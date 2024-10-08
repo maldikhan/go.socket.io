@@ -200,7 +200,6 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ./
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Display SARIF results
         if: github.actor == 'nektos/act'
