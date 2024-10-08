@@ -57,6 +57,65 @@ jobs:
       working-directory: examples
       run: go vet -v ./...
 
+  test-coverage: 
+    name: Run tests and collect coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: Cache Go modules and gosec
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/go/bin
+          key: ${{ runner.os }}-go-stable-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-stable-
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run tests for main project
+        run: go test `go list ./...|grep -v mocks` -coverprofile=coverage.out
+
+      - name: Run tests for jsoniter
+        working-directory: socket.io/v5/parser/default/jsoniter
+        run: go test `go list ./...|grep -v mocks` -coverprofile=../../../../../coverage.payloadparser.jsoniter.out
+
+      - name: Upload results to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: |
+            ./coverage.out
+            ./coverage.payloadparser.jsoniter.out
+          flags: unittests
+          fail_ci_if_error: true
+
+      - name: Check coverage
+        run: |
+          total_coverage=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+          if (( $(echo "$total_coverage < 80" | bc -l) )); then
+            echo "Code coverage is below 80%"
+            exit 1
+          fi
+          total_coverage=$(go tool cover -func=coverage.jsoniter.out | grep total | awk '{print $3}' | sed 's/%//')
+          if (( $(echo "$total_coverage < 80" | bc -l) )); then
+            echo "Code coverage is below 80%"
+            exit 1
+          fi
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
