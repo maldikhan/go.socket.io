@@ -336,6 +336,13 @@ func TestSocketIOV5DefaultParser_parseEvent(t *testing.T) {
 			},
 			wantErr: nil,
 		},
+		{
+			name:       "Invalid JSON payload",
+			input:      []byte(`["event", {"key": "value"}, [1, 2, 3], {"invalid": json}]`),
+			emptyEvent: false,
+			want:       nil,
+			wantErr:    ErrParseEvent,
+		},
 	}
 
 	parser := NewParser(
@@ -389,7 +396,8 @@ func TestSocketIOV5DefaultParser_parseEvent(t *testing.T) {
 
 		mockPayloadParser.EXPECT().ParseEvent([]byte("123"), false).Return(&socketio_v5.Event{}, nil)
 
-		parser.ParseEvent([]byte("123"), false)
+		_, err := parser.ParseEvent([]byte("123"), false)
+		assert.Nil(t, err)
 	})
 }
 

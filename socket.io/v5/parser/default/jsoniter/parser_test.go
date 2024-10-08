@@ -7,11 +7,8 @@ import (
 	"time"
 
 	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
-	"github.com/maldikhan/go.socket.io/utils"
 	"github.com/stretchr/testify/assert"
 )
-
-var logger = &utils.DefaultLogger{Level: utils.NONE}
 
 func TestSocketIOV5DefaultParser_parseEvent(t *testing.T) {
 
@@ -164,45 +161,48 @@ func TestSocketIOV5DefaultParser_parseEvent(t *testing.T) {
 			},
 			wantErr: nil,
 		},
+		{
+			name:       "Invalid JSON payload",
+			input:      []byte(`["event", {"key": "value"}, [1, 2, 3], {"invalid": json}]`),
+			emptyEvent: false,
+			want:       nil,
+			wantErr:    ErrParseEvent,
+		},
 	}
 
 	parser := NewPayloadParser()
-	{
-		t.Run(fmt.Sprintf("%T", parser), func(t *testing.T) {
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			for _, tt := range tests {
-				t.Run(tt.name, func(t *testing.T) {
-					t.Parallel()
-					got, err := parser.ParseEvent(tt.input, tt.emptyEvent)
-					if tt.wantErr != nil {
-						assert.Error(t, err)
-						assert.ErrorIs(t, err, tt.wantErr)
-					} else {
-						assert.NoError(t, err)
-					}
+			got, err := parser.ParseEvent(tt.input, tt.emptyEvent)
+			if tt.wantErr != nil {
+				assert.Error(t, err)
+				assert.ErrorIs(t, err, tt.wantErr)
+			} else {
+				assert.NoError(t, err)
+			}
 
-					if got != nil && tt.want != nil {
-						assert.Equal(t, tt.want.Name, got.Name)
-						assert.Len(t, got.Payloads, len(tt.want.Payloads))
+			if got != nil && tt.want != nil {
+				assert.Equal(t, tt.want.Name, got.Name)
+				assert.Len(t, got.Payloads, len(tt.want.Payloads))
 
-						if got.Payloads != nil {
-							for i, payload := range got.Payloads {
-								// Jsoniter parser returns []byte instead of RawMessage
-								if bytesPayload, ok := payload.([]byte); ok {
-									got.Payloads[i] = json.RawMessage(bytesPayload)
-								}
-							}
-						}
-
-						for i, payload := range tt.want.Payloads {
-							assert.JSONEq(t, toJSON(t, payload), toJSON(t, got.Payloads[i]))
+				if got.Payloads != nil {
+					for i, payload := range got.Payloads {
+						// Jsoniter parser returns []byte instead of RawMessage
+						if bytesPayload, ok := payload.([]byte); ok {
+							got.Payloads[i] = json.RawMessage(bytesPayload)
 						}
 					}
+				}
 
-					if (got == nil || tt.want == nil) && (got != tt.want) {
-						assert.Fail(t, "got: %v, want: %v", got, tt.want)
-					}
-				})
+				for i, payload := range tt.want.Payloads {
+					assert.JSONEq(t, toJSON(t, payload), toJSON(t, got.Payloads[i]))
+				}
+			}
+
+			if (got == nil || tt.want == nil) && (got != tt.want) {
+				assert.Fail(t, "got: %v, want: %v", got, tt.want)
 			}
 		})
 	}
@@ -342,14 +342,6 @@ func toJSON(t *testing.T, v interface{}) string {
 	jsonBytes, err := json.Marshal(v)
 	assert.NoError(t, err)
 	return string(jsonBytes)
-}
-
-func intPtr(i int) *int {
-	return &i
-}
-
-func strPtr(s string) *string {
-	return &s
 }
 
 type AStruct struct {
