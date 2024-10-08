@@ -2,12 +2,12 @@
 
 A Go implementation of the Socket.IO v5 client, compatible with Socket.IO v4 servers.
 
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/maldikhan/go.socket.io/blob/main/LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/maldikhan/go.socket.io.svg)](https://pkg.go.dev/github.com/maldikhan/go.socket.io)
 [![Go Report Card](https://goreportcard.com/badge/github.com/maldikhan/go.socket.io)](https://goreportcard.com/report/github.com/maldikhan/go.socket.io)
 [![Go Test and Lint](https://github.com/maldikhan/go.socket.io/actions/workflows/run-test.yaml/badge.svg)](https://github.com/maldikhan/go.socket.io/actions/workflows/run-test.yaml)
 [![codecov](https://codecov.io/github/maldikhan/go.socket.io/graph/badge.svg?token=HQTEDRMY81)](https://codecov.io/github/maldikhan/go.socket.io)
 [![CodeQL](https://github.com/maldikhan/go.socket.io/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/maldikhan/go.socket.io/actions/workflows/github-code-scanning/codeql)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/maldikhan/go.socket.io/blob/main/LICENSE)
 
 This library implements a zero side dependency client compatible with the Socket.IO v5 protocol and Engine.IO v4 protocol. It supports WebSocket and HTTP long-polling transports, as well as the authorization mechanism introduced in Socket.IO v5.
 
