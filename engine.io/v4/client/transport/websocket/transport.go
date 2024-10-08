@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/url"
 
-	engineio_v4 "maldikhan/go.socket.io/engine.io/v4"
+	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 )
 
 type Transport struct {
@@ -91,7 +91,10 @@ func (c *Transport) connectWebSocket() error {
 		if err != nil {
 			c.log.Errorf("wsReadLoop: %s", err)
 		}
-		c.ws.Close()
+		err = c.ws.Close()
+		if err != nil {
+			c.log.Errorf("wsClose: %s", err)
+		}
 		// TODO: Reconnect
 	}()
 
@@ -101,11 +104,11 @@ func (c *Transport) connectWebSocket() error {
 func (c *Transport) wsReadLoop() error {
 	c.log.Debugf("run ws read loop")
 
-	// Создаем канал для получения WebSocket сообщений
+	// Make challel for messages
 	messageCh := make(chan []byte)
 	errorCh := make(chan error)
 	for {
-		// Запускаем горутину для чтения WebSocket сообщений
+		// Run  ws read loop in goroutine
 		go func() {
 			var message []byte
 			err := c.ws.Receive(&message)
@@ -123,18 +126,18 @@ func (c *Transport) wsReadLoop() error {
 			return nil
 
 		case <-c.ctx.Done():
-			// Контекст отменен, выходим из цикла
+			// Context cancelled
 			c.log.Debugf("Context cancelled, exiting ws read loop")
 			c.onClose <- c.ctx.Err()
 			return c.ctx.Err()
 
 		case message := <-messageCh:
-			// Получено сообщение WebSocket
+			// New message received
 			c.log.Debugf("receiveWs: %s", message)
 			c.messages <- message
 
 		case err := <-errorCh:
-			// Произошла ошибка при чтении WebSocket
+			// WebSocket error
 			c.log.Errorf("receiveWsError: %v", err)
 			c.onClose <- err
 			return err

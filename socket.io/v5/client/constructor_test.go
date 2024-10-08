@@ -8,9 +8,9 @@ import (
 
 	"github.com/golang/mock/gomock"
 
-	mocks "maldikhan/go.socket.io/socket.io/v5/client/mocks"
-	socketio_v5_parser "maldikhan/go.socket.io/socket.io/v5/parser"
-	"maldikhan/go.socket.io/utils"
+	mocks "github.com/maldikhan/go.socket.io/socket.io/v5/client/mocks"
+	socketio_v5_parser "github.com/maldikhan/go.socket.io/socket.io/v5/parser/default"
+	"github.com/maldikhan/go.socket.io/utils"
 )
 
 func TestNewClient(t *testing.T) {
@@ -49,7 +49,7 @@ func TestNewClient(t *testing.T) {
 				ackCallbacks: make(map[int]func([]interface{})),
 				logger:       &utils.DefaultLogger{},
 				timer:        &utils.DefaultTimer{},
-				parser:       &socketio_v5_parser.SocketIOV5Parser{},
+				parser:       &socketio_v5_parser.SocketIOV5DefaultParser{},
 			},
 		},
 		{
@@ -119,7 +119,19 @@ func TestNewClient(t *testing.T) {
 				WithURL(testURL),
 				WithParser(nil),
 			},
-			wantErr: true,
+			want: &Client{
+				handshakeData: make(map[string]interface{}),
+				namespaces: map[string]*namespace{
+					"/": {name: "/"},
+				},
+				defaultNs: &namespace{
+					name: "/",
+				},
+				ackCallbacks: make(map[int]func([]interface{})),
+				logger:       &utils.DefaultLogger{},
+				timer:        &utils.DefaultTimer{},
+				parser:       &socketio_v5_parser.SocketIOV5DefaultParser{},
+			},
 		},
 		{
 			name: "Nil timer",

@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"time"
 
-	engineio_v4 "maldikhan/go.socket.io/engine.io/v4"
+	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 )
 
 type Transport struct {
@@ -31,7 +31,11 @@ type Transport struct {
 
 func (c *Transport) SetHandshake(handshake *engineio_v4.HandshakeResponse) {
 	c.sid = handshake.Sid
-	c.pinger.Reset(time.Duration(handshake.PingInterval) * time.Millisecond)
+	pingInterval := 10 * time.Second
+	if handshake.PingInterval != 0 {
+		pingInterval = time.Duration(handshake.PingInterval) * time.Millisecond
+	}
+	c.pinger.Reset(pingInterval)
 }
 
 func (c *Transport) RequestHandshake() error {

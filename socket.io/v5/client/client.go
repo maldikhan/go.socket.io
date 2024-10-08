@@ -4,25 +4,30 @@ import (
 	"context"
 	"sync"
 
-	socketio_v5 "maldikhan/go.socket.io/socket.io/v5"
+	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
 )
 
 type Client struct {
-	ctx           context.Context
+	engineio EngineIOClient
+	parser   Parser
+	logger   Logger
+	timer    Timer
+
+	ctx   context.Context
+	mutex sync.RWMutex
+
 	handshakeData map[string]interface{}
-	engineio      EngineIOClient
-	parser        Parser
-	namespaces    map[string]*namespace
-	defaultNs     *namespace
-	logger        Logger
-	timer         Timer
-	mutex         sync.RWMutex
-	ackCallbacks  map[int]func([]interface{})
-	ackCounter    int
+
+	namespaces map[string]*namespace
+	defaultNs  *namespace
+
+	ackCallbacks map[int]func([]interface{})
+	ackCounter   int
 }
 
 type namespace struct {
-	client   *Client
+	client *Client
+
 	name     string
 	handlers map[string][]func([]interface{})
 }
@@ -32,10 +37,14 @@ func (c *Client) SetHandshakeData(data map[string]interface{}) {
 }
 
 func (c *Client) connectSocketIO(_ []byte) {
-	c.sendPacket(&socketio_v5.Message{
+	err := c.sendPacket(&socketio_v5.Message{
 		Type:    socketio_v5.PacketConnect,
 		Payload: c.handshakeData,
 	})
+
+	if err != nil {
+		c.logger.Errorf("Can't connect: %v", err)
+	}
 }
 
 func (c *Client) Connect(ctx context.Context) error {

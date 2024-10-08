@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"net/url"
 
-	engineio_v4_client "maldikhan/go.socket.io/engine.io/v4/client"
-	socketio_v5_parser "maldikhan/go.socket.io/socket.io/v5/parser"
-	"maldikhan/go.socket.io/utils"
+	engineio_v4_client "github.com/maldikhan/go.socket.io/engine.io/v4/client"
+	socketio_v5_parser_default "github.com/maldikhan/go.socket.io/socket.io/v5/parser/default"
+	"github.com/maldikhan/go.socket.io/utils"
 )
 
 type ClientOption func(*InitClient) error
@@ -24,9 +24,9 @@ func NewClient(options ...ClientOption) (*Client, error) {
 			handshakeData: make(map[string]interface{}),
 			namespaces:    make(map[string]*namespace),
 			ackCallbacks:  make(map[int]func([]interface{})),
-			logger:        &utils.DefaultLogger{},
-			timer:         &utils.DefaultTimer{},
-			parser:        &socketio_v5_parser.SocketIOV5Parser{},
+
+			logger: &utils.DefaultLogger{},
+			timer:  &utils.DefaultTimer{},
 		},
 	}
 
@@ -41,7 +41,9 @@ func NewClient(options ...ClientOption) (*Client, error) {
 	}
 
 	if client.parser == nil {
-		return nil, errors.New("parser is nil")
+		client.parser = socketio_v5_parser_default.NewParser(
+			socketio_v5_parser_default.WithLogger(client.logger),
+		)
 	}
 
 	if client.timer == nil {

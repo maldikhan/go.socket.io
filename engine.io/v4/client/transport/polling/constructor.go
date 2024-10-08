@@ -5,13 +5,13 @@ import (
 	"net/http"
 	"time"
 
-	"maldikhan/go.socket.io/utils"
+	"github.com/maldikhan/go.socket.io/utils"
 )
 
 type EngineTransportOption func(*Transport) error
 
 func NewTransport(options ...EngineTransportOption) (*Transport, error) {
-	// Создаем клиент с настройками по умолчанию
+	// Create default client
 	client := &Transport{
 		log:         &utils.DefaultLogger{},
 		httpClient:  &http.Client{},
@@ -19,7 +19,7 @@ func NewTransport(options ...EngineTransportOption) (*Transport, error) {
 		stopPooling: make(chan struct{}, 1),
 	}
 
-	// Применяем пользовательские настройки
+	// Apply options
 	for _, opt := range options {
 		if err := opt(client); err != nil {
 			return nil, err

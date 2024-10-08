@@ -27,7 +27,7 @@ type Message struct {
 
 type HandshakeResponse struct {
 	Sid          string   `json:"sid"`
-	Upgrades     []string `json:"upgrades"`
-	PingInterval int      `json:"pingInterval"`
-	PingTimeout  int      `json:"pingTimeout"`
+	Upgrades     []string `json:"upgrades,omitempty"`
+	PingInterval int      `json:"pingInterval,omitempty"`
+	PingTimeout  int      `json:"pingTimeout,omitempty"`
 }

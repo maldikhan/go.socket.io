@@ -6,11 +6,11 @@ package mock_engineio_v4_client
 
 import (
 	context "context"
-	engineio_v4 "maldikhan/go.socket.io/engine.io/v4"
 	url "net/url"
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
+	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 )
 
 // MockParser is a mock of Parser interface.

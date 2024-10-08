@@ -13,8 +13,8 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 
-	engineio_v4 "maldikhan/go.socket.io/engine.io/v4"
-	mocks "maldikhan/go.socket.io/engine.io/v4/client/transport/polling/mocks"
+	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
+	mocks "github.com/maldikhan/go.socket.io/engine.io/v4/client/transport/polling/mocks"
 )
 
 func TestSetHandshake(t *testing.T) {
@@ -134,7 +134,7 @@ func TestRun(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 
 		// Stop the client
-		client.Stop()
+		assert.NoError(t, client.Stop())
 
 		// Check if onClose channel receives nil
 		select {
@@ -158,7 +158,7 @@ func TestRun(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 
 		// Stop the client
-		client.Stop()
+		assert.NoError(t, client.Stop())
 
 		// Check if onClose channel receives nil
 		select {
@@ -272,7 +272,7 @@ func TestPollingLoop(t *testing.T) {
 				assert.Fail(t, "expected ping to be called")
 			}
 
-			client.Stop()
+			assert.NoError(t, client.Stop())
 		}()
 
 		exitChan := make(chan struct{})

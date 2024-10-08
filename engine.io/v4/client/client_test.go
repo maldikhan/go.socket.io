@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,8 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	engineio_v4 "maldikhan/go.socket.io/engine.io/v4"
-	mocks "maldikhan/go.socket.io/engine.io/v4/client/mocks"
+	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
+	mocks "github.com/maldikhan/go.socket.io/engine.io/v4/client/mocks"
 )
 
 func TestClient_Connect(t *testing.T) {
@@ -318,6 +319,7 @@ func TestClient_handleHandshake(t *testing.T) {
 		mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte("probe"), nil)
 		mockTransportWs.EXPECT().SendMessage([]byte("probe")).Return(nil)
 
+		client.hadHandshake = sync.Once{}
 		client.waitHandshake = make(chan struct{})
 		err := client.handleHandshake(data)
 		assert.NoError(t, err)
@@ -343,6 +345,7 @@ func TestClient_handleHandshake(t *testing.T) {
 		mockTransportWs.EXPECT().SetHandshake(handshakeResp)
 		mockLogger.EXPECT().Warnf("unsupported upgrade: %s", "xyz")
 
+		client.hadHandshake = sync.Once{}
 		client.waitHandshake = make(chan struct{})
 		err := client.handleHandshake(data)
 		assert.NoError(t, err)
@@ -389,10 +392,31 @@ func TestClient_handlePacket(t *testing.T) {
 
 	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
-	t.Run("Open packet", func(t *testing.T) {
+	t.Run("Open packet error (wrong handshake)", func(t *testing.T) {
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any())
 		mockParser.EXPECT().Parse([]byte("open")).Return(&engineio_v4.Message{Type: engineio_v4.PacketOpen, Data: []byte("{}")}, nil)
 		err := client.handlePacket([]byte("open"))
+		assert.Error(t, err)
+	})
+
+	t.Run("Open packet with Sid only", func(t *testing.T) {
+		client.waitHandshake = make(chan struct{})
+		mockParser.EXPECT().Parse([]byte("open")).Return(&engineio_v4.Message{Type: engineio_v4.PacketOpen, Data: []byte(`{"sid":"123"}`)}, nil)
+		err := client.handlePacket([]byte("open"))
 		assert.NoError(t, err)
+		assert.Equal(t, "123", client.sid)
+	})
+
+	t.Run("Few open packets", func(t *testing.T) {
+		client.waitHandshake = make(chan struct{})
+		mockParser.EXPECT().Parse([]byte("open")).Return(&engineio_v4.Message{Type: engineio_v4.PacketOpen, Data: []byte(`{"sid":"123"}`)}, nil)
+		mockParser.EXPECT().Parse([]byte("open")).Return(&engineio_v4.Message{Type: engineio_v4.PacketOpen, Data: []byte(`{"sid":"1234"}`)}, nil)
+		err := client.handlePacket([]byte("open"))
+		assert.NoError(t, err)
+		assert.Equal(t, "123", client.sid)
+		err = client.handlePacket([]byte("open"))
+		assert.NoError(t, err)
+		assert.Equal(t, "1234", client.sid)
 	})
 
 	t.Run("Close packet", func(t *testing.T) {
@@ -412,10 +436,25 @@ func TestClient_handlePacket(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
+	t.Run("Ping packet error", func(t *testing.T) {
+		mockParser.EXPECT().Parse([]byte("ping")).Return(&engineio_v4.Message{Type: engineio_v4.PacketPing}, nil)
+		mockParser.EXPECT().Serialize(gomock.Any()).Return(nil, errors.New("serialize error"))
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any())
+		err := client.handlePacket([]byte("ping"))
+		assert.Error(t, err)
+	})
+
 	t.Run("Pong packet", func(t *testing.T) {
 		mockParser.EXPECT().Parse([]byte("pong")).Return(&engineio_v4.Message{Type: engineio_v4.PacketPong}, nil)
 		err := client.handlePacket([]byte("pong"))
 		assert.NoError(t, err)
+	})
+
+	t.Run("Pong packet error", func(t *testing.T) {
+		mockParser.EXPECT().Parse([]byte("pong")).Return(nil, errors.New("parse error"))
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any())
+		err := client.handlePacket([]byte("pong"))
+		assert.Error(t, err)
 	})
 
 	t.Run("Pong probe packet", func(t *testing.T) {
@@ -425,6 +464,16 @@ func TestClient_handlePacket(t *testing.T) {
 		client.waitUpgrade = make(chan struct{})
 		err := client.handlePacket([]byte("pong probe"))
 		assert.NoError(t, err)
+	})
+
+	t.Run("Pong probe packet error", func(t *testing.T) {
+		mockParser.EXPECT().Parse([]byte("pong probe")).Return(&engineio_v4.Message{Type: engineio_v4.PacketPong, Data: []byte("probe")}, nil)
+		mockParser.EXPECT().Serialize(&engineio_v4.Message{Type: engineio_v4.PacketUpgrade}).Return([]byte("5"), nil)
+		mockTransport.EXPECT().SendMessage([]byte("5")).Return(errors.New("send error"))
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any())
+		client.waitUpgrade = make(chan struct{})
+		err := client.handlePacket([]byte("pong probe"))
+		assert.Error(t, err)
 	})
 
 	t.Run("Message packet", func(t *testing.T) {

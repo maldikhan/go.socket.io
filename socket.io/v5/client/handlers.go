@@ -1,16 +1,16 @@
 package socketio_v5_client
 
-import socketio_v5 "maldikhan/go.socket.io/socket.io/v5"
+import socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
 
-func (c *Client) OnRaw(event string, handler func([]interface{})) {
+func (c *Client) On(event string, handler interface{}) {
 	c.defaultNs.On(event, handler)
 }
-func (c *Client) On(event string, handler interface{}) {
-	c.defaultNs.On(event, c.defaultNs.parseEventCallback(handler))
-}
 
-func (n *namespace) On(event string, handler func([]interface{})) {
-	n.handlers[event] = append(n.handlers[event], handler)
+func (n *namespace) On(event string, handler interface{}) {
+	n.handlers[event] = append(
+		n.handlers[event],
+		n.client.parser.WrapCallback(handler),
+	)
 }
 
 func (c *Client) onMessage(data []byte) {

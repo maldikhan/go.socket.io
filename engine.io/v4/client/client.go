@@ -6,9 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sync"
 	"time"
 
-	engineio_v4 "maldikhan/go.socket.io/engine.io/v4"
+	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 )
 
 type Client struct {
@@ -26,7 +27,9 @@ type Client struct {
 	reconnectAttempts   int
 	reconnectWait       time.Duration
 	waitUpgrade         chan struct{}
+	hadUpgrade          sync.Once
 	waitHandshake       chan struct{}
+	hadHandshake        sync.Once
 	stopPooling         chan struct{}
 	transportClosed     chan error
 	afterConnect        func()
@@ -48,6 +51,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		return err
 	}
 
+	c.hadHandshake = sync.Once{}
 	c.waitHandshake = make(chan struct{}, 1)
 	err = c.transport.RequestHandshake()
 	if err != nil {
@@ -80,6 +84,7 @@ func (c *Client) messageLoop(messages <-chan []byte) {
 }
 
 func (c *Client) transportUpgrade(transport Transport) error {
+	c.hadUpgrade = sync.Once{}
 	c.waitUpgrade = make(chan struct{}, 1)
 	err := c.transport.Stop()
 	if err != nil {
@@ -122,11 +127,18 @@ func (c *Client) handleHandshake(data []byte) error {
 	}
 
 	c.sid = handshakeResp.Sid
-	c.pingInterval = time.NewTicker(time.Duration(handshakeResp.PingInterval) * time.Millisecond)
-	c.pingTimeout = time.Duration(handshakeResp.PingTimeout) * time.Millisecond
+	if handshakeResp.PingInterval != 0 {
+		c.pingInterval = time.NewTicker(time.Duration(handshakeResp.PingInterval) * time.Millisecond)
+	}
+
+	if handshakeResp.PingTimeout != 0 {
+		c.pingTimeout = time.Duration(handshakeResp.PingTimeout) * time.Millisecond
+	}
 
 	// close handshake
-	close(c.waitHandshake)
+	c.hadHandshake.Do(func() {
+		close(c.waitHandshake)
+	})
 
 	// Call onConnect hook
 	if c.afterConnect != nil {
@@ -162,26 +174,40 @@ func (c *Client) handlePacket(packetData []byte) error {
 
 	switch packet.Type {
 	case engineio_v4.PacketOpen:
-		c.handleHandshake(
+		err := c.handleHandshake(
 			packet.Data,
 		)
+		if err != nil {
+			c.log.Errorf("handle handshake error: %s", err)
+			return err
+		}
 	case engineio_v4.PacketClose:
 		if c.closeHandler != nil {
 			c.closeHandler()
 		}
 	case engineio_v4.PacketPing:
-		c.sendPacket(&engineio_v4.Message{
+		err := c.sendPacket(&engineio_v4.Message{
 			Type: engineio_v4.PacketPong,
 		})
+		if err != nil {
+			c.log.Errorf("send ping error: %s", err)
+		}
+		return err
 	case engineio_v4.PacketPong:
 		if string(packet.Data) == "probe" {
-			c.sendPacket(&engineio_v4.Message{
+			err := c.sendPacket(&engineio_v4.Message{
 				Type: engineio_v4.PacketUpgrade,
 			})
-			c.log.Debugf("Protocol upgraded")
-			close(c.waitUpgrade)
+			c.hadUpgrade.Do(func() {
+				close(c.waitUpgrade)
+			})
+			if err != nil {
+				c.log.Errorf("send upgrade error: %s", err)
+				return err
+			} else {
+				c.log.Debugf("Protocol upgraded")
+			}
 		}
-		// Handle pong
 	case engineio_v4.PacketMessage:
 		if c.messageHandler != nil {
 			c.messageHandler(packet.Data)

@@ -6,11 +6,11 @@ package mock_socketio_v5_client
 
 import (
 	context "context"
-	socketio_v5 "maldikhan/go.socket.io/socket.io/v5"
 	reflect "reflect"
 	time "time"
 
 	gomock "github.com/golang/mock/gomock"
+	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
 )
 
 // MockParser is a mock of Parser interface.
@@ -64,6 +64,20 @@ func (m *MockParser) Serialize(arg0 *socketio_v5.Message) ([]byte, error) {
 func (mr *MockParserMockRecorder) Serialize(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Serialize", reflect.TypeOf((*MockParser)(nil).Serialize), arg0)
+}
+
+// WrapCallback mocks base method.
+func (m *MockParser) WrapCallback(callback interface{}) func([]interface{}) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "WrapCallback", callback)
+	ret0, _ := ret[0].(func([]interface{}))
+	return ret0
+}
+
+// WrapCallback indicates an expected call of WrapCallback.
+func (mr *MockParserMockRecorder) WrapCallback(callback interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WrapCallback", reflect.TypeOf((*MockParser)(nil).WrapCallback), callback)
 }
 
 // MockEngineIOClient is a mock of EngineIOClient interface.

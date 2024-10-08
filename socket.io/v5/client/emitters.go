@@ -1,88 +1,94 @@
 package socketio_v5_client
 
 import (
+	"errors"
 	"time"
 
-	socketio_v5 "maldikhan/go.socket.io/socket.io/v5"
+	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
+	"github.com/maldikhan/go.socket.io/socket.io/v5/client/emit"
 )
 
-func (c *Client) Emit(event string, args ...interface{}) error {
+func (c *Client) Emit(event interface{}, args ...interface{}) error {
+
 	return c.defaultNs.Emit(event, args...)
 }
 
-func (c *Client) EmitWathAckTimeout(timeout time.Duration, callback interface{}, onTimeout func(), event string, args ...interface{}) error {
-	return c.EmitWathAckRawTimeout(timeout, c.defaultNs.parseEventCallback(callback), onTimeout, event, args...)
-}
+func (n *namespace) Emit(event interface{}, args ...interface{}) error {
 
-func (c *Client) EmitWathAckRawTimeout(timeout time.Duration, callback func([]interface{}), onTimeout func(), event string, args ...interface{}) error {
-	return c.defaultNs.EmitWathAckRawTimeout(timeout, callback, onTimeout, event, args...)
-}
+	emitOptions := &emit.EmitOptions{}
 
-func (c *Client) EmitWathAck(callback interface{}, event string, args ...interface{}) error {
-	return c.EmitWathAckRaw(c.defaultNs.parseEventCallback(callback), event, args...)
-}
+	emitEvent := &socketio_v5.Event{}
+	isEventDefined := true
 
-func (c *Client) EmitWathAckRaw(callback func([]interface{}), event string, args ...interface{}) error {
-	return c.defaultNs.EmitWathAckRaw(callback, event, args...)
-}
+	switch eventData := event.(type) {
+	case string:
+		emitEvent.Name = eventData
+		isEventDefined = false
+	case socketio_v5.Event:
+		emitEvent = &eventData
+	case *socketio_v5.Event:
+		emitEvent = eventData
+	default:
+		return errors.New("invalid event type")
+	}
 
-func (n *namespace) Emit(event string, args ...interface{}) error {
-	return n.client.sendPacket(&socketio_v5.Message{
-		NS:   n.name,
-		Type: socketio_v5.PacketEvent,
-		Event: &socketio_v5.Event{
-			Name:     event,
-			Payloads: args,
-		},
-	})
-}
+	optLen := 0
+	for i := 0; i < len(args); i++ {
+		switch v := args[i].(type) {
+		case emit.EmitOption:
+			v(emitOptions)
+		default:
+			if isEventDefined {
+				return errors.New("you can pass ether Event() ether eventName and params, not both")
+			}
+			args[optLen] = args[i]
+			optLen++
+		}
+	}
 
-func (n *namespace) EmitWathAckTimeout(timeout time.Duration, callback interface{}, onTimeout func(), event string, args ...interface{}) error {
-	return n.EmitWathAckRawTimeout(timeout, n.parseEventCallback(callback), onTimeout, event, args)
-}
-func (n *namespace) EmitWathAckRawTimeout(timeout time.Duration, callback func([]interface{}), onTimeout func(), event string, args ...interface{}) error {
+	if !isEventDefined {
+		emitEvent.Payloads = args[:optLen]
+	}
+
+	if emitOptions.AckCallback() == nil && emitOptions.Timeout() == nil {
+		return n.client.sendPacket(&socketio_v5.Message{
+			NS:    n.name,
+			Type:  socketio_v5.PacketEvent,
+			Event: emitEvent,
+		})
+	}
+
 	return n.client.sendPacketWithAckTimeout(
 		&socketio_v5.Message{
-			Type: socketio_v5.PacketEvent,
-			Event: &socketio_v5.Event{
-				Name:     event,
-				Payloads: args,
-			},
+			Type:  socketio_v5.PacketEvent,
+			Event: emitEvent,
 		},
-		callback,
-		&timeout,
-		onTimeout,
+		emitOptions.AckCallback(),
+		emitOptions.Timeout(),
+		emitOptions.TimeoutCallback(),
 	)
-}
-
-func (n *namespace) EmitWathAck(callback interface{}, event string, args ...interface{}) error {
-	return n.EmitWathAckRaw(n.parseEventCallback(callback), event, args)
-}
-func (n *namespace) EmitWathAckRaw(callback func([]interface{}), event string, args ...interface{}) error {
-	return n.client.sendPacketWithAck(&socketio_v5.Message{
-		Type: socketio_v5.PacketEvent,
-		Event: &socketio_v5.Event{
-			Name:     event,
-			Payloads: args,
-		},
-	}, callback)
-}
-
-func (c *Client) sendPacketWithAck(packet *socketio_v5.Message, callback func([]interface{})) error {
-	return c.sendPacketWithAckTimeout(packet, callback, nil, nil)
 }
 
 func (c *Client) sendPacketWithAckTimeout(
 	packet *socketio_v5.Message,
-	callback func([]interface{}),
+	callback interface{},
 	timeout *time.Duration,
 	timeoutCallback func(),
 ) error {
 
+	var wrappedCallback func([]interface{})
+	if callback != nil {
+		wrappedCallback = c.parser.WrapCallback(callback)
+		if wrappedCallback == nil {
+			return errors.New("callback must be a function")
+		}
+	}
+
 	var done chan []interface{}
 	if timeout != nil {
-		done = make(chan []interface{})
+		done = make(chan []interface{}, 1)
 	}
+
 	c.mutex.Lock()
 	c.ackCounter++
 	counter := c.ackCounter
@@ -92,8 +98,8 @@ func (c *Client) sendPacketWithAckTimeout(
 			done <- param
 		}
 	} else {
-		if callback != nil {
-			c.ackCallbacks[counter] = callback
+		if wrappedCallback != nil {
+			c.ackCallbacks[counter] = wrappedCallback
 		}
 	}
 	c.mutex.Unlock()
@@ -112,20 +118,14 @@ func (c *Client) sendPacketWithAckTimeout(
 			case <-c.ctx.Done():
 				c.logger.Warnf("context is done: %v", c.ctx.Err())
 			case param := <-done:
-				if callback != nil {
-					callback(param)
+				if wrappedCallback != nil {
+					wrappedCallback(param)
 				}
 			}
 		}(done)
 	}
 
-	packetData, err := c.parser.Serialize(packet)
-
-	if err != nil {
-		return err
-	}
-
-	return c.engineio.Send(packetData)
+	return c.sendPacket(packet)
 }
 
 func (c *Client) sendPacket(packet *socketio_v5.Message) error {

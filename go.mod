@@ -1,11 +1,11 @@
-module maldikhan/go.socket.io
+module github.com/maldikhan/go.socket.io
 
 go 1.22.4
 
 require (
 	github.com/golang/mock v1.6.0
 	github.com/stretchr/testify v1.9.0
-	golang.org/x/net v0.29.0
+	golang.org/x/net v0.30.0
 )
 
 require (

@@ -2,13 +2,16 @@ package socketio_v5_client
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
 	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
 
-	socketio_v5 "maldikhan/go.socket.io/socket.io/v5"
-	mocks "maldikhan/go.socket.io/socket.io/v5/client/mocks"
+	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
+	mocks "github.com/maldikhan/go.socket.io/socket.io/v5/client/mocks"
 )
 
 func TestSetHandshakeData(t *testing.T) {
@@ -34,10 +37,12 @@ func TestConnectSocketIO(t *testing.T) {
 
 	mockEngineIO := mocks.NewMockEngineIOClient(ctrl)
 	mockParser := mocks.NewMockParser(ctrl)
+	mockLogger := mocks.NewMockLogger(ctrl)
 
 	client := &Client{
 		engineio:      mockEngineIO,
 		parser:        mockParser,
+		logger:        mockLogger,
 		handshakeData: map[string]interface{}{"foo": "bar"},
 	}
 
@@ -48,6 +53,14 @@ func TestConnectSocketIO(t *testing.T) {
 
 	mockParser.EXPECT().Serialize(gomock.Eq(expectedPacket)).Return([]byte("encoded_packet"), nil)
 	mockEngineIO.EXPECT().Send(gomock.Any()).Return(nil)
+
+	client.connectSocketIO(nil)
+
+	mockParser.EXPECT().Serialize(gomock.Eq(expectedPacket)).Return(nil, errors.New("send error"))
+	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).Do(func(format string, v ...interface{}) {
+		str := fmt.Sprintf(format, v...)
+		assert.Contains(t, str, "send error")
+	})
 
 	client.connectSocketIO(nil)
 }
@@ -96,6 +109,7 @@ func TestNamespace(t *testing.T) {
 
 			if ns == nil {
 				t.Errorf("namespace() returned nil for name %s", tc.name)
+				return
 			}
 
 			if ns.name != tc.name {

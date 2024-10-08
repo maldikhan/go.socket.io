@@ -4,8 +4,8 @@ import (
 	"errors"
 	"net/url"
 
-	"maldikhan/go.socket.io/utils"
-	ws_native "maldikhan/go.socket.io/websocket/native"
+	"github.com/maldikhan/go.socket.io/utils"
+	ws_native "github.com/maldikhan/go.socket.io/websocket/native"
 )
 
 type EngineTransportOption func(*Transport) error

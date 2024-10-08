@@ -3,7 +3,7 @@ package engineio_v4_parser
 import (
 	"errors"
 
-	engineio_v4 "maldikhan/go.socket.io/engine.io/v4"
+	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 )
 
 type EngineIOV4Parser struct{}

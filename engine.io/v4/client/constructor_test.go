@@ -2,7 +2,6 @@ package engineio_v4_client
 
 import (
 	"errors"
-	"net/http"
 	"net/url"
 	"reflect"
 	"testing"
@@ -11,13 +10,12 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 
-	engineio_v4 "maldikhan/go.socket.io/engine.io/v4"
-	mocks "maldikhan/go.socket.io/engine.io/v4/client/mocks"
-	engineio_v4_client_transport_polling "maldikhan/go.socket.io/engine.io/v4/client/transport/polling"
-	engineio_v4_client_transport_ws "maldikhan/go.socket.io/engine.io/v4/client/transport/websocket"
-	engineio_v4_parser "maldikhan/go.socket.io/engine.io/v4/parser"
-	"maldikhan/go.socket.io/utils"
-	ws_native "maldikhan/go.socket.io/websocket/native"
+	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
+	mocks "github.com/maldikhan/go.socket.io/engine.io/v4/client/mocks"
+	engineio_v4_client_transport_polling "github.com/maldikhan/go.socket.io/engine.io/v4/client/transport/polling"
+	engineio_v4_client_transport_ws "github.com/maldikhan/go.socket.io/engine.io/v4/client/transport/websocket"
+	engineio_v4_parser "github.com/maldikhan/go.socket.io/engine.io/v4/parser"
+	"github.com/maldikhan/go.socket.io/utils"
 )
 
 func TestNewClientEdges(t *testing.T) {
@@ -28,16 +26,6 @@ func TestNewClientEdges(t *testing.T) {
 
 	t.Run("Empty logger", func(t *testing.T) {
 		_, err := NewClient(WithRawURL("http://example.com"), WithLogger(nil))
-		assert.Error(t, err)
-	})
-
-	t.Run("Empty ws", func(t *testing.T) {
-		_, err := NewClient(WithRawURL("http://example.com"), WithWebSocket(nil))
-		assert.Error(t, err)
-	})
-
-	t.Run("Empty http client", func(t *testing.T) {
-		_, err := NewClient(WithRawURL("http://example.com"), WithHTTPClient(nil))
 		assert.Error(t, err)
 	})
 
@@ -72,8 +60,6 @@ func TestNewClient(t *testing.T) {
 	mockLogger := mocks.NewMockLogger(ctrl)
 	mockParser := mocks.NewMockParser(ctrl)
 	mockTransport := mocks.NewMockTransport(ctrl)
-	mockHttpClient := &http.Client{}
-	mockWebSocket := &ws_native.WebSocketConnection{}
 
 	testURL, _ := url.Parse("http://example.com/socket.io/")
 
@@ -110,8 +96,6 @@ func TestNewClient(t *testing.T) {
 				WithLogger(mockLogger),
 				WithParser(mockParser),
 				WithTransport(mockTransport),
-				WithHTTPClient(mockHttpClient),
-				WithWebSocket(mockWebSocket),
 				WithReconnectAttempts(3),
 				WithReconnectWait(3 * time.Second),
 			},
@@ -154,7 +138,7 @@ func TestNewClient(t *testing.T) {
 			name: "With option error",
 			options: []EngineClientOption{
 				WithURL(testURL),
-				func(*ClientInit) error { return errors.New("oops") },
+				func(*Client) error { return errors.New("oops") },
 			},
 			wantErr: true,
 		},
@@ -244,7 +228,7 @@ func TestWithURL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			parsedURL, _ := url.Parse(tc.url)
 			option := WithURL(parsedURL)
-			client := &ClientInit{Client: &Client{}}
+			client := &Client{}
 			err := option(client)
 
 			if (err != nil) != tc.wantErr {
@@ -280,7 +264,7 @@ func TestWithRawURL(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			option := WithRawURL(tc.url)
-			client := &ClientInit{Client: &Client{}}
+			client := &Client{}
 			err := option(client)
 
 			if (err != nil) != tc.wantErr {
@@ -303,7 +287,7 @@ func TestWithLogger(t *testing.T) {
 
 	mockLogger := mocks.NewMockLogger(ctrl)
 	option := WithLogger(mockLogger)
-	client := &ClientInit{Client: &Client{}}
+	client := &Client{}
 	err := option(client)
 
 	if err != nil {
@@ -321,7 +305,7 @@ func TestWithTransport(t *testing.T) {
 
 	mockTransport := mocks.NewMockTransport(ctrl)
 	option := WithTransport(mockTransport)
-	client := &ClientInit{Client: &Client{}}
+	client := &Client{}
 	err := option(client)
 
 	if err != nil {
@@ -345,7 +329,7 @@ func TestWithSupportedTransports(t *testing.T) {
 
 	transports := []Transport{mockTransport1, mockTransport2}
 	option := WithSupportedTransports(transports)
-	client := &ClientInit{Client: &Client{supportedTransports: make(map[engineio_v4.EngineIOTransport]Transport)}}
+	client := &Client{supportedTransports: make(map[engineio_v4.EngineIOTransport]Transport)}
 	err := option(client)
 
 	if err != nil {
@@ -365,49 +349,13 @@ func TestWithSupportedTransports(t *testing.T) {
 	}
 }
 
-func TestWithHTTPClient(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockHTTPClient := &http.Client{}
-	option := WithHTTPClient(mockHTTPClient)
-	client := &ClientInit{}
-	err := option(client)
-
-	if err != nil {
-		t.Errorf("WithHTTPClient() returned an error: %v", err)
-	}
-
-	if client.httpClient != mockHTTPClient {
-		t.Errorf("WithHTTPClient() did not set the HTTP client correctly")
-	}
-}
-
-func TestWithWebSocket(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockWebSocket := &ws_native.WebSocketConnection{}
-	option := WithWebSocket(mockWebSocket)
-	client := &ClientInit{}
-	err := option(client)
-
-	if err != nil {
-		t.Errorf("WithWebSocket() returned an error: %v", err)
-	}
-
-	if client.ws != mockWebSocket {
-		t.Errorf("WithWebSocket() did not set the WebSocket correctly")
-	}
-}
-
 func TestWithParser(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
 	mockParser := mocks.NewMockParser(ctrl)
 	option := WithParser(mockParser)
-	client := &ClientInit{Client: &Client{}}
+	client := &Client{}
 	err := option(client)
 
 	if err != nil {
@@ -432,7 +380,8 @@ func TestWithReconnectAttempts(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			option := WithReconnectAttempts(tc.attempts)
-			client := &ClientInit{Client: &Client{}}
+			client := &Client{}
+
 			err := option(client)
 
 			if err != nil {
@@ -459,7 +408,8 @@ func TestWithReconnectWait(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			option := WithReconnectWait(tc.wait)
-			client := &ClientInit{Client: &Client{}}
+			client := &Client{}
+
 			err := option(client)
 
 			if err != nil {

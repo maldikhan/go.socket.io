@@ -6,10 +6,11 @@ import (
 	"context"
 	"time"
 
-	socketio_v5 "maldikhan/go.socket.io/socket.io/v5"
+	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
 )
 
 type Parser interface {
+	WrapCallback(callback interface{}) func(in []interface{})
 	Parse([]byte) (*socketio_v5.Message, error)
 	Serialize(*socketio_v5.Message) ([]byte, error)
 }

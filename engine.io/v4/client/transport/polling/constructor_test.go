@@ -8,8 +8,8 @@ import (
 
 	"github.com/golang/mock/gomock"
 
-	mocks "maldikhan/go.socket.io/engine.io/v4/client/transport/polling/mocks"
-	"maldikhan/go.socket.io/utils"
+	mocks "github.com/maldikhan/go.socket.io/engine.io/v4/client/transport/polling/mocks"
+	"github.com/maldikhan/go.socket.io/utils"
 )
 
 func TestNewTransport(t *testing.T) {

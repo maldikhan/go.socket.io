@@ -1,21 +1,32 @@
-package socketio_v5_client
+package socketio_v5_parser_default
 
 import (
 	"encoding/json"
 	"reflect"
 )
 
-func (n *namespace) parseEventCallback(callback interface{}) func(in []interface{}) {
+func (p *SocketIOV5DefaultParser) WrapCallback(callback interface{}) func(in []interface{}) {
+
+	if p.payloadParser != nil {
+		return p.payloadParser.WrapCallback(callback)
+	}
+
+	switch v := callback.(type) {
+	case func([]interface{}):
+		return v
+	}
+
 	callbackValue := reflect.ValueOf(callback)
 	callbackType := callbackValue.Type()
 
 	if callbackType.Kind() != reflect.Func {
-		panic("callback must be a function")
+		p.logger.Errorf("callback must be a function")
+		return nil
 	}
 
 	return func(in []interface{}) {
 		if len(in) < callbackType.NumIn() {
-			n.client.logger.Errorf("Error: expected %d arguments, got %d\n", callbackType.NumIn(), len(in))
+			p.logger.Errorf("Error: expected %d arguments, got %d\n", callbackType.NumIn(), len(in))
 			return
 		}
 
@@ -25,11 +36,11 @@ func (n *namespace) parseEventCallback(callback interface{}) func(in []interface
 			argValue := reflect.New(argType).Interface()
 			data, ok := in[i].(json.RawMessage)
 			if !ok {
-				n.client.logger.Errorf("Wrong data in %d json entity", i)
+				p.logger.Errorf("Wrong data in %d json entity", i)
 				return
 			}
 			if err := json.Unmarshal(data, argValue); err != nil {
-				n.client.logger.Errorf("Error unmarshaling argument %d (%v): %v\n", i, in[i], err)
+				p.logger.Errorf("Error unmarshaling argument %d (%v): %v\n", i, in[i], err)
 				return
 			}
 			args[i] = reflect.ValueOf(argValue).Elem()

@@ -8,9 +8,9 @@ import (
 
 	"github.com/golang/mock/gomock"
 
-	mocks "maldikhan/go.socket.io/engine.io/v4/client/transport/websocket/mocks"
-	"maldikhan/go.socket.io/utils"
-	ws_native "maldikhan/go.socket.io/websocket/native"
+	mocks "github.com/maldikhan/go.socket.io/engine.io/v4/client/transport/websocket/mocks"
+	"github.com/maldikhan/go.socket.io/utils"
+	ws_native "github.com/maldikhan/go.socket.io/websocket/native"
 )
 
 func TestNewTransport(t *testing.T) {
