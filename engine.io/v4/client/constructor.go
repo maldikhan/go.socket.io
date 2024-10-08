@@ -46,19 +46,13 @@ func NewClient(options ...EngineClientOption) (*Client, error) {
 	}
 
 	if len(client.supportedTransports) == 0 {
-		wsTransport, err := engineio_v4_client_transport_ws.NewTransport(
+		wsTransport, _ := engineio_v4_client_transport_ws.NewTransport(
 			engineio_v4_client_transport_ws.WithLogger(client.log),
 		)
-		if err != nil {
-			return nil, err
-		}
-		pollingTransport, err := engineio_v4_client_transport_polling.NewTransport(
+		pollingTransport, _ := engineio_v4_client_transport_polling.NewTransport(
 			engineio_v4_client_transport_polling.WithDefaultPinger(client.pingInterval),
 			engineio_v4_client_transport_polling.WithLogger(client.log),
 		)
-		if err != nil {
-			return nil, err
-		}
 		if client.supportedTransports == nil {
 			client.supportedTransports = make(map[engineio_v4.EngineIOTransport]Transport)
 		}
