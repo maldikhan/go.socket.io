@@ -58,7 +58,7 @@ jobs:
       run: go vet -v ./...
 
   test-coverage: 
-    name: Run tests and collect coverage
+    name: Collect code test coverage
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -193,14 +193,14 @@ jobs:
         run: |
           cd socket.io/v5/parser/default/jsoniter
           go mod download
-          gosec -fmt=sarif -out=../../../../../gosec.payloayparser-jsoniter.sarif  -quiet ./...    
+          gosec -fmt=sarif -out=../../../../../gosec.payloayparser.jsoniter.sarif -quiet ./...    
 
       - name: Upload SARIF file
         if: github.event_name != 'pull_request' && github.actor != 'nektos/act'
-        uses: github/codeql-action/upload-sarif@v2
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: |
-            gosec.payloayparser-jsoniter.sarif
+            gosec.payloayparser.jsoniter.sarif
             gosec.main.sarif
             gosec.examples.sarif
           token: ${{ secrets.GITHUB_TOKEN }}
