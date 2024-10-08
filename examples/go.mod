@@ -7,7 +7,7 @@ replace github.com/maldikhan/go.socket.io => ../
 replace github.com/maldikhan/go.socket.io/socket.io/v5/parser/default/jsoniter => ../socket.io/v5/parser/default/jsoniter
 
 require (
-	github.com/maldikhan/go.socket.io v0.0.2
+	github.com/maldikhan/go.socket.io v1.0.0
 	github.com/maldikhan/go.socket.io/socket.io/v5/parser/default/jsoniter v0.0.2
 )
 

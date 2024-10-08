@@ -2,3 +2,4 @@
 .vscode
 .fleet
 coverage.*
+*.sarif

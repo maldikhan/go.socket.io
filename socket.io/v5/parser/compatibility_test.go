@@ -24,6 +24,8 @@ var allParsers = map[string]socketio_v5_client.Parser{
 func TestWrapCallback(t *testing.T) {
 
 	for name, parser := range allParsers {
+		parser := parser
+
 		t.Run(fmt.Sprintf("%T-%s", parser, name), func(t *testing.T) {
 			t.Parallel()
 
@@ -170,9 +172,13 @@ func TestMsgSerializeRestore(t *testing.T) {
 	}
 
 	for _, parser := range allParsers {
+		parser := parser
+
 		t.Run(fmt.Sprintf("%T", parser), func(t *testing.T) {
 			t.Parallel()
 			for _, tt := range tests {
+				tt := tt
+
 				t.Run(tt.name, func(t *testing.T) {
 					t.Parallel()
 					serialized, err := parser.Serialize(tt.msg)

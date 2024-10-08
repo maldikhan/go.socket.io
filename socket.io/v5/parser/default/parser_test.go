@@ -158,6 +158,7 @@ func TestSocketIOV5DefaultParser_Parse(t *testing.T) {
 		WithLogger(logger),
 	)
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := parser.Parse(tt.input)
@@ -349,6 +350,7 @@ func TestSocketIOV5DefaultParser_parseEvent(t *testing.T) {
 		WithLogger(logger),
 	)
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := parser.ParseEvent(tt.input, tt.emptyEvent)
@@ -632,6 +634,7 @@ func TestSocketIOV5DefaultParser_Serialize(t *testing.T) {
 		WithLogger(logger),
 	)
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := parser.Serialize(tt.input)
@@ -836,6 +839,7 @@ func TestMsgSerializeRestore(t *testing.T) {
 	)
 
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			serialized, err := parser.Serialize(tt.msg)
