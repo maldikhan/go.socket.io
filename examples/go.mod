@@ -1,6 +1,6 @@
 module github.com/maldikhan/go.socket.io/examples
 
-go 1.23.1
+go 1.18
 
 replace github.com/maldikhan/go.socket.io => ../
 

@@ -1,6 +1,6 @@
 module github.com/maldikhan/go.socket.io/socket.io/v5/parser/default/jsoniter
 
-go 1.23.1
+go 1.18
 
 require (
 	github.com/golang/mock v1.6.0
