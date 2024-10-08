@@ -22,4 +22,4 @@ test:
 bench:
 	go test -bench=. ./... -benchmem
 act-ci-test:
-	DOCKER_HOST=`docker context inspect --format '{{.Endpoints.docker.Host}}'` act push -v -n
+	DOCKER_HOST=`docker context inspect --format '{{.Endpoints.docker.Host}}'` act
