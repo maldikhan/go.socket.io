@@ -150,7 +150,7 @@ err := client.Close()
 - `WithDefaultNamespace(string)`: Set the default namespace
 - `WithLogger(Logger)`: Use a custom logger
 - `WithTimer(Timer)`: Use a custom timer
-- `WithParser(Parser)`: Use a custom parser
+- `WithParser(Parser)`: Use a custom parser (see [jsoniter fast default event parser implementation](./socket.io/v5/parser/default/jsoniter/))
 
 </details>
 
