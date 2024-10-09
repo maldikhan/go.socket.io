@@ -13,6 +13,23 @@ This library implements a zero side dependency client compatible with the Socket
 
 **Note: This is a preview version implementing the core functionality of the protocols. It's in an early stage of testing and may not be suitable for production use.**
 
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Features](#features)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [Creating a client](#creating-a-client)
+  - [Connecting to a server](#connecting-to-a-server)
+  - [Event handling](#event-handling)
+  - [Emitting events](#emitting-events)
+  - [Closing the connection](#closing-the-connection)
+- [Advanced Configuration](#advanced-configuration)
+- [Limitations](#limitations)
+- [Contributing](#contributing)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
+
 ## Quick Start
 
 ```go
@@ -84,12 +101,40 @@ client, err := socketio.NewClient(
 
 ### Connecting to a server
 
+Basic connection:
+
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 defer cancel()
 
 err := client.Connect(ctx)
+if err != nil {
+    log.Fatal(err)
+}
 ```
+
+You can also pass one or more callback functions as additional parameters to `client.Connect`. These callbacks will be executed upon successful connection. This is effectively an alias for `client.On("connect", func(){...})`. Here's an example:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+
+err := client.Connect(ctx, 
+    func() {
+        fmt.Println("Connected to the server!")
+    },
+    func() {
+        fmt.Println("This is another on-connect callback")
+    },
+)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+This approach allows you to set up connection handlers inline with the connection call, which can be more convenient in some cases. It's particularly useful when you want to perform specific actions immediately after a successful connection, such as joining rooms or emitting initial events.
+
+Remember that these callbacks will be called every time a connection is established, including after automatic reconnects if your client is configured to use them.
 
 ### Event handling
 
@@ -115,26 +160,69 @@ client.On("result", func(args []interface{}) {
 })
 ```
 
+The library allows you to handle socket.io internal events:
+```go
+client.On("connect", func() {
+ // ... do anything on namespace connected
+ // you should emit events to namespace only after NS connection
+})
+
+client.On("disconnect", func() {
+ // ... do anything on disconnected
+})
+
+client.On("error", func() {
+ // ... do anything on connect error
+})
+```
+
 ### Emitting events
 
-Simple event emission:
+**Important Note:** Emitting events is only possible after a connection to the namespace has been established (i.e., after receiving the 'connect' event). When calling `Emit` for a namespace that hasn't established a connection yet, the `Emit` method will block until the 'connect' event is received from that namespace.
 
+Simple event emission:
 ```go
 err := client.Emit("eventName", "eventData")
+if err != nil {
+    log.Println("Error emitting event:", err)
+}
 ```
 
 Emitting events with acknowledgement and timeout:
-
 ```go
 err = client.Emit("delay", 1000,
- emit.WithAck(func(delayResponse string) {
-  fmt.Println("Ack received:", delayResponse)
- }),
- emit.WithTimeout(500*time.Millisecond, func() {
-  fmt.Println("Ack timeout occurred")
- }),
+    emit.WithAck(func(delayResponse string) {
+        fmt.Println("Ack received:", delayResponse)
+    }),
+    emit.WithTimeout(500*time.Millisecond, func() {
+        fmt.Println("Ack timeout occurred")
+    }),
 )
+if err != nil {
+    log.Println("Error emitting event:", err)
+}
 ```
+
+To ensure proper sequencing, you can use the following pattern:
+
+```go
+client.On("connect", func() {
+    fmt.Println("Connected to namespace")
+    // Now it's safe to emit events
+    err := client.Emit("eventName", "eventData")
+    if err != nil {
+        fmt.Println("Error emitting event:", err)
+    }
+})
+
+err := client.Connect(ctx)
+if err != nil {
+    fmt.Println("Error connecting:", err)
+    return
+}
+```
+
+This approach guarantees that you'll start emitting events only after the connection to the namespace has been established, preventing event loss and potential errors related to premature emission attempts.
 
 ### Closing the connection
 
@@ -176,7 +264,7 @@ err := client.Close()
 - Binary packets are not currently supported
 - Reconnection functionality is not yet implemented (TBD)
 - Full namespace support is not yet implemented (TBD)
-- Syntetic events like connect/disconnect are not implemented yet (TBD)
+- Syntetic events like reconnect/reconnect_error are not implemented yet (TBD)
 - Contract is stable but may be extended in future releases, please follow socket.io limitations for event naming
 
 ## Contributing
