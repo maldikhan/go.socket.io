@@ -19,39 +19,39 @@ This library implements a zero side dependency client compatible with the Socket
 package main
 
 import (
-	"context"
-	"fmt"
-	"log"
-	"time"
+ "context"
+ "fmt"
+ "log"
+ "time"
 
-	socketio "github.com/maldikhan/go.socket.io"
+ socketio "github.com/maldikhan/go.socket.io"
 )
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+ ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+ defer cancel()
 
-	client, err := socketio.NewClient(
-		socketio.WithRawURL("http://localhost:3000"),
-	)
-	if err != nil {
-		log.Fatalf("Error creating client: %v", err)
-	}
+ client, err := socketio.NewClient(
+  socketio.WithRawURL("http://localhost:3000"),
+ )
+ if err != nil {
+  log.Fatalf("Error creating client: %v", err)
+ }
 
 
-	client.On("eventname", func(data []byte) {
-		fmt.Printf("Received message: %s\n", string(data))
-	})
+ client.On("eventname", func(data []byte) {
+  fmt.Printf("Received message: %s\n", string(data))
+ })
 
-	if err := client.Connect(ctx); err != nil {
-		log.Fatalf("Error connecting to server: %v", err)
-	}
+ if err := client.Connect(ctx); err != nil {
+  log.Fatalf("Error connecting to server: %v", err)
+ }
 
-	if err := client.Emit("hello", "world"); err != nil {
-		log.Fatalf("Error sending message: %v", err)
-	}
+ if err := client.Emit("hello", "world"); err != nil {
+  log.Fatalf("Error sending message: %v", err)
+ }
 
-	<-ctx.Done()
+ <-ctx.Done()
 }
 ```
 
@@ -77,8 +77,8 @@ go get github.com/maldikhan/go.socket.io
 
 ```go
 client, err := socketio.NewClient(
-	socketio.WithRawURL("http://localhost:3000"),
-	socketio.WithLogger(customLogger),
+ socketio.WithRawURL("http://localhost:3000"),
+ socketio.WithLogger(customLogger),
 )
 ```
 
@@ -99,8 +99,8 @@ The library allows you to handle events in two ways:
 
 ```go
 client.On("result", func(operation string, result int) {
-	// Process event ["result", "operationtype", 123]
-	fmt.Printf("Operation: %s, Result: %d\n", operation, result)
+ // Process event ["result", "operationtype", 123]
+ fmt.Printf("Operation: %s, Result: %d\n", operation, result)
 })
 ```
 
@@ -108,10 +108,10 @@ client.On("result", func(operation string, result int) {
 
 ```go
 client.On("result", func(args []interface{}) {
-	// Extract raw JSON data
-	if arg0, ok := args[0].(json.RawMessage); ok {
-		// Process raw JSON
-	}
+ // Extract raw JSON data
+ if arg0, ok := args[0].(json.RawMessage); ok {
+  // Process raw JSON
+ }
 })
 ```
 
@@ -127,12 +127,12 @@ Emitting events with acknowledgement and timeout:
 
 ```go
 err = client.Emit("delay", 1000,
-	emit.WithAck(func(delayResponse string) {
-		fmt.Println("Ack received:", delayResponse)
-	}),
-	emit.WithTimeout(500*time.Millisecond, func() {
-		fmt.Println("Ack timeout occurred")
-	}),
+ emit.WithAck(func(delayResponse string) {
+  fmt.Println("Ack received:", delayResponse)
+ }),
+ emit.WithTimeout(500*time.Millisecond, func() {
+  fmt.Println("Ack timeout occurred")
+ }),
 )
 ```
 
