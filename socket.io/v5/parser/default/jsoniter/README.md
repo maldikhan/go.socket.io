@@ -51,6 +51,10 @@ func main() {
     }
     
     // Use the client as normal
+    /*
+        err := client.Connect(ctx)
+        ...
+    */
 }
 ```
 
