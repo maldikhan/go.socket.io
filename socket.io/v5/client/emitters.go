@@ -15,6 +15,14 @@ func (c *Client) Emit(event interface{}, args ...interface{}) error {
 
 func (n *namespace) Emit(event interface{}, args ...interface{}) error {
 
+	if n.waitConnected != nil {
+		select {
+		case <-n.waitConnected:
+		case <-n.client.ctx.Done():
+			return n.client.ctx.Err()
+		}
+	}
+
 	emitOptions := &emit.EmitOptions{}
 
 	emitEvent := &socketio_v5.Event{}

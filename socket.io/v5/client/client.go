@@ -30,6 +30,9 @@ type namespace struct {
 
 	name     string
 	handlers map[string][]func([]interface{})
+
+	waitConnected chan struct{}
+	hadConnected  sync.Once
 }
 
 func (c *Client) SetHandshakeData(data map[string]interface{}) {
@@ -47,9 +50,11 @@ func (c *Client) connectSocketIO(_ []byte) {
 	}
 }
 
-func (c *Client) Connect(ctx context.Context) error {
+func (c *Client) Connect(ctx context.Context, callbacks ...func(arg interface{})) error {
 	c.ctx = ctx
-
+	for _, callback := range callbacks {
+		c.On("connect", callback)
+	}
 	return c.engineio.Connect(ctx)
 }
 
@@ -62,9 +67,11 @@ func (c *Client) namespace(name string) *namespace {
 	}
 
 	ns := &namespace{
-		client:   c,
-		name:     name,
-		handlers: make(map[string][]func([]interface{})),
+		client:        c,
+		name:          name,
+		handlers:      make(map[string][]func([]interface{})),
+		waitConnected: make(chan struct{}),
+		hadConnected:  sync.Once{},
 	}
 	c.namespaces[name] = ns
 	return ns

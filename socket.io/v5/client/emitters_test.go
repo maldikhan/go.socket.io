@@ -14,6 +14,90 @@ import (
 	mocks "github.com/maldikhan/go.socket.io/socket.io/v5/client/mocks"
 )
 
+func TestEmitBeforeConnected(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockEngineIO := mocks.NewMockEngineIOClient(ctrl)
+	mockParser := mocks.NewMockParser(ctrl)
+	mockTimer := mocks.NewMockTimer(ctrl)
+	mockLogger := mocks.NewMockLogger(ctrl)
+
+	client := &Client{
+		defaultNs: &namespace{
+			client: &Client{
+				engineio:     mockEngineIO,
+				parser:       mockParser,
+				ackCallbacks: make(map[int]func([]interface{})),
+				ackCounter:   0,
+				timer:        mockTimer,
+				ctx:          context.Background(),
+				logger:       mockLogger,
+			},
+		},
+	}
+
+	t.Run("wait ok", func(t *testing.T) {
+		mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte{}, nil)
+		mockEngineIO.EXPECT().Send(gomock.Any()).Return(nil)
+
+		client.defaultNs.waitConnected = make(chan struct{})
+		emitDone := make(chan struct{})
+		go func() {
+			err := client.Emit("test_event", "arg1", "arg2")
+			emitDone <- struct{}{}
+			assert.NoError(t, err)
+		}()
+		go func() {
+			<-time.After(20 * time.Millisecond)
+			close(client.defaultNs.waitConnected)
+		}()
+
+		select {
+		case <-emitDone:
+			assert.Fail(t, "emit should not be done")
+		case <-time.After(10 * time.Millisecond):
+		}
+
+		select {
+		case <-emitDone:
+		case <-time.After(20 * time.Millisecond):
+			assert.Fail(t, "emit should be done")
+		}
+	})
+
+	t.Run("ctx timeout", func(t *testing.T) {
+		ctx, done := context.WithCancel(context.Background())
+
+		client.defaultNs.waitConnected = make(chan struct{})
+		client.defaultNs.client.ctx = ctx
+
+		emitDone := make(chan error)
+		go func() {
+			err := client.Emit("test_event", "arg1", "arg2")
+			emitDone <- err
+			assert.Error(t, err)
+		}()
+		go func() {
+			<-time.After(20 * time.Millisecond)
+			done()
+		}()
+
+		select {
+		case <-emitDone:
+			assert.Fail(t, "emit should not be done")
+		case <-time.After(10 * time.Millisecond):
+		}
+
+		select {
+		case <-emitDone:
+		case <-time.After(2000 * time.Millisecond):
+			assert.Fail(t, "emit should be done")
+		}
+	})
+
+}
+
 func TestClientEmit(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

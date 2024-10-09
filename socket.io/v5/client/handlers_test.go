@@ -3,6 +3,7 @@ package socketio_v5_client
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -120,6 +121,34 @@ func TestClientOnMessage(t *testing.T) {
 
 		client.onMessage([]byte("valid data"))
 	})
+
+	t.Run("PacketConnect", func(t *testing.T) {
+		ns := &namespace{handlers: make(map[string][]func([]interface{}))}
+		client.namespaces[""] = ns
+
+		msg := &socketio_v5.Message{
+			NS:   "",
+			Type: socketio_v5.PacketConnect,
+		}
+
+		mockParser.EXPECT().Parse(gomock.Any()).Return(msg, nil)
+
+		client.onMessage([]byte("valid data"))
+	})
+
+	t.Run("PacketDisconnect", func(t *testing.T) {
+		ns := &namespace{handlers: make(map[string][]func([]interface{}))}
+		client.namespaces[""] = ns
+
+		msg := &socketio_v5.Message{
+			NS:   "",
+			Type: socketio_v5.PacketDisconnect,
+		}
+
+		mockParser.EXPECT().Parse(gomock.Any()).Return(msg, nil)
+
+		client.onMessage([]byte("valid data"))
+	})
 }
 
 func TestClientHandleEvent(t *testing.T) {
@@ -151,6 +180,131 @@ func TestClientHandleEvent(t *testing.T) {
 		}
 
 		client.handleEvent(ns, &socketio_v5.Event{Name: "test_event"})
+
+		assert.True(t, <-handlerCalled)
+	})
+}
+
+func TestClientHandleConnect(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+
+	ns := &namespace{
+		handlers: make(map[string][]func([]interface{})),
+	}
+
+	client := &Client{
+		logger:    mockLogger,
+		defaultNs: ns,
+	}
+
+	t.Run("No Handlers", func(t *testing.T) {
+		mockLogger.EXPECT().Infof(gomock.Any(), gomock.Any())
+
+		client.handleConnect(ns, "test")
+	})
+
+	t.Run("With Handlers", func(t *testing.T) {
+		mockLogger.EXPECT().Infof(gomock.Any(), gomock.Any())
+		handlerCalled := make(chan bool)
+		ns.handlers["connect"] = []func([]interface{}){
+			func(args []interface{}) {
+				handlerCalled <- true
+			},
+		}
+
+		client.handleConnect(ns, "test")
+
+		assert.True(t, <-handlerCalled)
+	})
+
+	t.Run("With channel notify", func(t *testing.T) {
+		mockLogger.EXPECT().Infof(gomock.Any(), gomock.Any())
+		client.defaultNs.hadConnected = sync.Once{}
+		client.defaultNs.waitConnected = make(chan struct{})
+		client.handleConnect(ns, "test")
+
+		select {
+		case <-client.defaultNs.waitConnected:
+		case <-time.After(10 * time.Millisecond):
+			assert.Fail(t, "should not be connected")
+		}
+	})
+}
+
+func TestClientHandleDisonnect(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+
+	ns := &namespace{
+		handlers: make(map[string][]func([]interface{})),
+	}
+
+	client := &Client{
+		logger:    mockLogger,
+		defaultNs: ns,
+	}
+
+	t.Run("No Handlers", func(t *testing.T) {
+		mockLogger.EXPECT().Infof(gomock.Any(), gomock.Any()).Times(2)
+
+		client.handleDisconnect(ns, "test")
+	})
+
+	t.Run("With Handlers", func(t *testing.T) {
+		mockLogger.EXPECT().Infof(gomock.Any(), gomock.Any())
+		handlerCalled := make(chan bool)
+		ns.handlers["disconnect"] = []func([]interface{}){
+			func(args []interface{}) {
+				handlerCalled <- true
+			},
+		}
+
+		client.handleDisconnect(ns, "test")
+
+		assert.True(t, <-handlerCalled)
+	})
+
+}
+
+func TestClientHandleConnectError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+
+	ns := &namespace{
+		handlers: make(map[string][]func([]interface{})),
+	}
+
+	client := &Client{
+		logger:    mockLogger,
+		defaultNs: ns,
+	}
+
+	t.Run("No Handlers", func(t *testing.T) {
+		mockLogger.EXPECT().Infof(gomock.Any(), gomock.Any()).Times(2)
+
+		client.handleConnectError(ns, "test")
+	})
+
+	t.Run("With Handlers", func(t *testing.T) {
+		mockLogger.EXPECT().Infof(gomock.Any(), gomock.Any())
+		handlerCalled := make(chan bool)
+		ns.handlers["error"] = []func([]interface{}){
+			func(args []interface{}) {
+				handlerCalled <- true
+			},
+		}
+
+		client.handleConnectError(ns, "test")
 
 		assert.True(t, <-handlerCalled)
 	})

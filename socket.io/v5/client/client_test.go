@@ -75,18 +75,46 @@ func TestConnect(t *testing.T) {
 		engineio: mockEngineIO,
 	}
 
-	ctx := context.Background()
-	mockEngineIO.EXPECT().Connect(ctx).Return(nil)
+	t.Run("Connect", func(t *testing.T) {
+		ctx := context.Background()
+		mockEngineIO.EXPECT().Connect(ctx).Return(nil)
 
-	err := client.Connect(ctx)
+		err := client.Connect(ctx)
 
-	if err != nil {
-		t.Errorf("Connect() returned an error: %v", err)
-	}
+		if err != nil {
+			t.Errorf("Connect() returned an error: %v", err)
+		}
 
-	if client.ctx != ctx {
-		t.Errorf("Connect() did not set the context correctly")
-	}
+		if client.ctx != ctx {
+			t.Errorf("Connect() did not set the context correctly")
+		}
+	})
+
+	t.Run("Connect with callbacks", func(t *testing.T) {
+		ctx := context.Background()
+		mockEngineIO.EXPECT().Connect(ctx).Return(nil)
+
+		parser := mocks.NewMockParser(ctrl)
+		parser.EXPECT().WrapCallback(gomock.Any()).Return(func(in []interface{}) {}).Times(2)
+
+		client.parser = parser
+		client.defaultNs = &namespace{
+			client:   client,
+			handlers: make(map[string][]func([]interface{})),
+		}
+
+		err := client.Connect(ctx, func(arg interface{}) {}, func(arg interface{}) {})
+
+		if err != nil {
+			t.Errorf("Connect() returned an error: %v", err)
+		}
+
+		if client.ctx != ctx {
+			t.Errorf("Connect() did not set the context correctly")
+		}
+
+		assert.Len(t, client.defaultNs.handlers["connect"], 2)
+	})
 }
 
 func TestNamespace(t *testing.T) {

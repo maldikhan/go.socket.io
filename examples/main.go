@@ -9,12 +9,14 @@ import (
 	"os/signal"
 	"time"
 
+	engineio_v4_client "github.com/maldikhan/go.socket.io/engine.io/v4/client"
+	engineio_v4_client_transport_ws "github.com/maldikhan/go.socket.io/engine.io/v4/client/transport/websocket"
 	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
 	socketio_v5_client "github.com/maldikhan/go.socket.io/socket.io/v5/client"
 	"github.com/maldikhan/go.socket.io/socket.io/v5/client/emit"
 	socketio_v5_parser_default "github.com/maldikhan/go.socket.io/socket.io/v5/parser/default"
 	socketio_v5_parser_default_jsoniter "github.com/maldikhan/go.socket.io/socket.io/v5/parser/default/jsoniter"
-	"github.com/maldikhan/go.socket.io/utils"
+	"go.uber.org/zap"
 )
 
 func main() {
@@ -33,22 +35,63 @@ func main() {
 
 	results := make(chan *Result, 1)
 
+	logger := zap.NewExample().Sugar()
+
+	// Custom client init for demo
+	wsTransport, err := engineio_v4_client_transport_ws.NewTransport(
+		engineio_v4_client_transport_ws.WithLogger(logger.Named("engine.io:transport:ws")),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	eioClient, err := engineio_v4_client.NewClient(
+		engineio_v4_client.WithRawURL("http://127.0.0.1:3001/socket.io/"),
+		engineio_v4_client.WithTransport(wsTransport),
+		engineio_v4_client.WithLogger(logger.Named("engine.io")),
+		engineio_v4_client.WithSupportedTransports([]engineio_v4_client.Transport{wsTransport}),
+	)
+	if err != nil {
+		panic(err)
+	}
+
 	client, err := socketio_v5_client.NewClient(
-		socketio_v5_client.WithRawURL("http://127.0.0.1:3001"),
-		socketio_v5_client.WithLogger(&utils.DefaultLogger{Level: utils.WARN}),
+		socketio_v5_client.WithEngineIOClient(eioClient),
+		socketio_v5_client.WithLogger(logger.Named("socket.io:client")),
 		socketio_v5_client.WithParser(socketio_v5_parser_default.NewParser(
-			socketio_v5_parser_default.WithLogger(&utils.DefaultLogger{Level: utils.WARN}),
+			socketio_v5_parser_default.WithLogger(logger.Named("socket.io:parser")),
 			socketio_v5_parser_default.WithPayloadParser(socketio_v5_parser_default_jsoniter.NewPayloadParser(
-				socketio_v5_parser_default_jsoniter.WithLogger(&utils.DefaultLogger{Level: utils.WARN}),
+				socketio_v5_parser_default_jsoniter.WithLogger(logger.Named("socket.io:parser:jsoniter")),
 			)),
 		)),
 	)
-
 	if err != nil {
-		fmt.Println(err)
+		panic(err)
 	}
 
+	// Or just default client
+	/*
+		url, err := url.Parse("http://127.0.0.1:3001")
+		if err != nil {
+			panic(err)
+		}
+		client, err := socketio_v5_client.NewClient(
+			socketio_v5_client.WithURL(url),
+		)
+		if err != nil {
+			panic(err)
+		}
+	*/
+
 	client.SetHandshakeData(map[string]interface{}{"userName": "Varvar"})
+
+	client.On("connect", func() {
+		fmt.Println("Connected")
+	})
+
+	client.On("disconnect", func() {
+		fmt.Println("Disconnected")
+	})
 
 	client.On("result", func(operation string, result int) {
 		results <- &Result{
@@ -59,7 +102,7 @@ func main() {
 
 	err = client.Connect(ctx)
 	if err != nil {
-		fmt.Println(err)
+		panic(err)
 	}
 
 	err = client.Emit("hi",
