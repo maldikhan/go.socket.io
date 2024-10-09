@@ -86,7 +86,7 @@ func main() {
 
 ## Installation
 
-```
+```bash
 go get github.com/maldikhan/go.socket.io
 ```
 
@@ -142,7 +142,7 @@ Remember that these callbacks will be called every time a connection is establis
 
 The library allows you to handle events in two ways:
 
-1. Automatically deserialize event parameters (similar to the original client):
+#### Automatically deserialize event parameters (similar to the original client)
 
 ```go
 client.On("result", func(operation string, result int) {
@@ -151,7 +151,7 @@ client.On("result", func(operation string, result int) {
 })
 ```
 
-2. Work with raw events:
+#### Work with raw events
 
 ```go
 client.On("result", func(args []interface{}) {
@@ -162,7 +162,10 @@ client.On("result", func(args []interface{}) {
 })
 ```
 
+#### Internal events
+
 The library allows you to handle socket.io internal events:
+
 ```go
 client.On("connect", func() {
  // ... do anything on namespace connected
@@ -183,6 +186,7 @@ client.On("error", func() {
 **Important Note:** Emitting events is only possible after a connection to the namespace has been established (i.e., after receiving the 'connect' event). When calling `Emit` for a namespace that hasn't established a connection yet, the `Emit` method will block until the 'connect' event is received from that namespace.
 
 Simple event emission:
+
 ```go
 err := client.Emit("eventName", "eventData")
 if err != nil {
@@ -191,6 +195,7 @@ if err != nil {
 ```
 
 Emitting events with acknowledgement and timeout:
+
 ```go
 err = client.Emit("delay", 1000,
     emit.WithAck(func(delayResponse string) {
@@ -234,8 +239,7 @@ err := client.Close()
 
 ## Advanced Configuration
 
-<details>
-<summary>Socket.IO Client Options</summary>
+### Socket.IO Client Options
 
 - `WithURL(*url.URL)`: Set the server URL
 - `WithRawURL(string)`: Set the server URL as a string
@@ -245,10 +249,7 @@ err := client.Close()
 - `WithTimer(Timer)`: Use a custom timer
 - `WithParser(Parser)`: Use a custom parser (see [jsoniter fast default event parser implementation](./socket.io/v5/parser/default/jsoniter/))
 
-</details>
-
-<details>
-<summary>Engine.IO Client Options</summary>
+### Engine.IO Client Options
 
 - `WithURL(*url.URL)`: Set the server URL
 - `WithRawURL(string)`: Set the server URL as a string
@@ -258,8 +259,6 @@ err := client.Close()
 - `WithParser(Parser)`: Use a custom parser
 - `WithReconnectAttempts(int)`: Set the number of reconnect attempts
 - `WithReconnectWait(time.Duration)`: Set the wait time between reconnect attempts
-
-</details>
 
 ## Limitations
 
