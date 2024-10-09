@@ -1,0 +1,45 @@
+name: Lint
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+permissions:
+  actions: read
+  security-events: write
+
+jobs:
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: 'stable'
+        check-latest: true
+
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v4
+      with:
+        version: latest
+        args: --timeout=5m
+
+    - name: Run golangci-lint examples
+      uses: golangci/golangci-lint-action@v4
+      with:
+        working-directory: examples
+        version: latest
+        args: --timeout=5m
+
+    - name: Run golangci-lint jsoniter
+      uses: golangci/golangci-lint-action@v4
+      with:
+        working-directory: socket.io/v5/parser/default/jsoniter
+        version: latest
+        args: --timeout=5m                

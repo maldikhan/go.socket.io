@@ -1,0 +1,118 @@
+name: Security
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+permissions:
+  actions: read
+  security-events: write
+
+jobs:
+
+  security:
+    name: Security Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 'stable'
+          check-latest: true
+
+      - name: Cache Go modules and gosec
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/go/bin
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-gosec
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install gosec
+        run: |
+          if ! command -v gosec &> /dev/null; then
+            go install github.com/securego/gosec/v2/cmd/gosec@latest
+          fi
+
+      - name: Run gosec on main project
+        run: |
+          go mod download
+          gosec -fmt=sarif -out=gosec.main.sarif -exclude-dir=socket.io/v5/parser/default/jsoniter -exclude-dir=examples ./...
+      - name: Run gosec on examples
+        run: |
+          cd examples
+          go mod download
+          gosec -fmt=sarif -out=../gosec.examples.sarif ./...
+      
+      - name: Run gosec on jsoniter parser
+        run: |
+          cd socket.io/v5/parser/default/jsoniter
+          go mod download
+          gosec -fmt=sarif -out=../../../../../gosec.payloayparser.jsoniter.sarif ./...    
+
+      - name: Upload SARIF file
+        if: github.event_name != 'pull_request' && github.actor != 'nektos/act'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ./
+
+      - name: Display SARIF results
+        if: github.actor == 'nektos/act'
+        run: cat gosec.*.sarif
+  
+  vuln-check:
+    name: Vulnerability Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 'stable'
+          check-latest: true
+
+      - name: Cache Go modules and gosec
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/go/bin
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-gosec
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install govulncheck
+        run: |
+          if ! command -v govulncheck &> /dev/null; then
+            go install golang.org/x/vuln/cmd/govulncheck@latest
+          fi
+
+      - name: Run govulncheck on main project
+        run: |
+          go mod download
+          govulncheck ./...
+
+      - name: Run govulncheck on examples
+        run: |
+          cd examples
+          go mod download
+          govulncheck ./...
+      
+      - name: Run govulncheck on jsoniter parser
+        run: |
+          cd socket.io/v5/parser/default/jsoniter
+          go mod download
+          govulncheck ./...

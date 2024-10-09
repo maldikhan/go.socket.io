@@ -8,23 +8,26 @@ import (
 	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
 )
 
-func (p *SocketIOV5DefaultParser) Serialize(msg *socketio_v5.Message) ([]byte, error) {
+func (p *SocketIOV5DefaultParser) validateMessage(msg *socketio_v5.Message) error {
 	if msg == nil {
-		return nil, errors.New("empty package")
+		return errors.New("empty package")
 	}
+	switch msg.Type {
+	case socketio_v5.PacketBinaryAck, socketio_v5.PacketBinaryEvent:
+		return errors.New("biniary events are not supported yet")
+	case socketio_v5.PacketEvent:
+		if msg.Event == nil || msg.Event.Name == "" {
+			return errors.New("wrong event name")
+		}
+	}
+	return nil
+}
+
+func (p *SocketIOV5DefaultParser) prepareSerializationInfo(msg *socketio_v5.Message) (int, []byte, []byte, error) {
 	pkgLen := 1
 	var ackId []byte = nil
 	var jsonData []byte = nil
 	var err error
-
-	switch msg.Type {
-	case socketio_v5.PacketBinaryAck, socketio_v5.PacketBinaryEvent:
-		return nil, errors.New("biniary events are not supported yet")
-	case socketio_v5.PacketEvent:
-		if msg.Event == nil || msg.Event.Name == "" {
-			return nil, errors.New("wrong event name")
-		}
-	}
 
 	if msg.NS != "/" {
 		pkgLen += (len(msg.NS) + 1)
@@ -42,7 +45,7 @@ func (p *SocketIOV5DefaultParser) Serialize(msg *socketio_v5.Message) ([]byte, e
 		data = append(data, msg.Event.Payloads...)
 		jsonData, err = json.Marshal(data)
 		if err != nil {
-			return nil, err
+			return 0, nil, nil, err
 		}
 		pkgLen += len(msg.Event.Name) + 2 + len(jsonData)
 	}
@@ -50,12 +53,27 @@ func (p *SocketIOV5DefaultParser) Serialize(msg *socketio_v5.Message) ([]byte, e
 	if msg.Payload != nil {
 		jsonData, err = json.Marshal(msg.Payload)
 		if err != nil {
-			return nil, err
+			return 0, nil, nil, err
 		}
 		if string(jsonData) == "null" || string(jsonData) == `""` || string(jsonData) == `{}` {
 			jsonData = []byte{}
 		}
 		pkgLen += len(jsonData)
+	}
+
+	return pkgLen, jsonData, ackId, nil
+}
+
+func (p *SocketIOV5DefaultParser) Serialize(msg *socketio_v5.Message) ([]byte, error) {
+
+	err := p.validateMessage(msg)
+	if err != nil {
+		return nil, err
+	}
+
+	pkgLen, jsonData, ackId, err := p.prepareSerializationInfo(msg)
+	if err != nil {
+		return nil, err
 	}
 
 	packet := make([]byte, 1, 1+pkgLen)

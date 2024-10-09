@@ -1,0 +1,121 @@
+name: Test
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+permissions:
+  actions: read
+  security-events: write
+
+jobs:
+
+  test:
+    name: Test on Go ${{ matrix.go-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.18', '1.19', '1.20', '1.21', '1.22','1.23', 'stable']
+      fail-fast: false
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go ${{ matrix.go-version }}
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go-version }}
+        check-latest: true
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-${{ matrix.go-version }}-
+
+    - name: Get dependencies
+      run: go get -v -t -d ./...
+
+    - name: Build
+      run: go build -v ./...
+
+    - name: Test
+      run: go test -v ./...
+
+    - name: Go vet
+      run: go vet -v ./...
+
+    - name: Test jsoniter
+      working-directory: socket.io/v5/parser/default/jsoniter
+      run: go test -v ./...  
+
+    - name: Go vet jsoniter
+      working-directory: socket.io/v5/parser/default/jsoniter
+      run: go vet -v ./...
+
+    - name: Go vet examples
+      working-directory: examples
+      run: go vet -v ./...
+
+  test-coverage: 
+    name: Collect code test coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: Cache Go modules and gosec
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/go/bin
+          key: ${{ runner.os }}-go-stable-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-stable-
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run tests for main project
+        run: go test `go list ./...|grep -v mocks` -coverprofile=coverage.out
+
+      - name: Run tests for jsoniter
+        working-directory: socket.io/v5/parser/default/jsoniter
+        run: go test `go list ./...|grep -v mocks` -coverprofile=../../../../../coverage.payloadparser.jsoniter.out
+
+      - name: Upload results to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: |
+            ./coverage.out
+            ./coverage.payloadparser.jsoniter.out
+          flags: unittests
+          fail_ci_if_error: true
+
+      - name: Check coverage
+        run: |
+          total_coverage=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+          if (( $(echo "$total_coverage < 80" | bc -l) )); then
+            echo "Code coverage is below 80%"
+            exit 1
+          fi
+          total_coverage=$(go tool cover -func=coverage.jsoniter.out | grep total | awk '{print $3}' | sed 's/%//')
+          if (( $(echo "$total_coverage < 80" | bc -l) )); then
+            echo "Code coverage is below 80%"
+            exit 1
+          fi

@@ -10,6 +10,8 @@ const (
 	PacketConnectError SocketIOPacket = 0x04
 	PacketBinaryEvent  SocketIOPacket = 0x05
 	PacketBinaryAck    SocketIOPacket = 0x06
+
+	PacketUnknown SocketIOPacket = 0xFF
 )
 
 type Message struct {

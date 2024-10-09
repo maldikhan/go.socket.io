@@ -27,9 +27,12 @@ func TestSocketIOV5DefaultParser_Parse(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name:    "Empty message",
-			input:   []byte{},
-			want:    nil,
+			name:  "Empty message",
+			input: []byte{},
+			want: &socketio_v5.Message{
+				Type: socketio_v5.PacketUnknown,
+				NS:   "/",
+			},
 			wantErr: ErrParsePackage,
 		},
 		{
@@ -91,6 +94,12 @@ func TestSocketIOV5DefaultParser_Parse(t *testing.T) {
 			input:   []byte(`2/test,`),
 			want:    nil,
 			wantErr: ErrParsePackage,
+		},
+		{
+			name:    "Event with wrong namespace only",
+			input:   []byte(`2/test`),
+			want:    nil,
+			wantErr: ErrParseEvent,
 		},
 		{
 			name:  "Binary event message",
