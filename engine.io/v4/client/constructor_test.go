@@ -3,12 +3,12 @@ package engineio_v4_client
 import (
 	"errors"
 	"net/url"
-	"reflect"
 	"testing"
 	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 	mocks "github.com/maldikhan/go.socket.io/engine.io/v4/client/mocks"
@@ -147,65 +147,38 @@ func TestNewClient(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := NewClient(tt.options...)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("NewClient() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if got == nil || tt.want == nil {
-				if got == tt.want {
-					return
-				}
-				t.Errorf("NewClient() got = %v, want %v", got, tt.want)
-				return
-			}
-
-			// Проверяем основные поля
-			if !reflect.DeepEqual(got.url, tt.want.url) {
-				t.Errorf("NewClient() url = %v, want %v", got.url, tt.want.url)
-			}
-			if reflect.TypeOf(got.log) != reflect.TypeOf(tt.want.log) {
-				t.Errorf("NewClient() log type = %T, want %T", got.log, tt.want.log)
-			}
-			if reflect.TypeOf(got.parser) != reflect.TypeOf(tt.want.parser) {
-				t.Errorf("NewClient() parser type = %T, want %T", got.parser, tt.want.parser)
-			}
-			if got.reconnectAttempts != tt.want.reconnectAttempts {
-				t.Errorf("NewClient() reconnectAttempts = %v, want %v", got.reconnectAttempts, tt.want.reconnectAttempts)
-			}
-			if got.reconnectWait != tt.want.reconnectWait {
-				t.Errorf("NewClient() reconnectWait = %v, want %v", got.reconnectWait, tt.want.reconnectWait)
-			}
-
-			// Проверяем каналы
-			if cap(got.stopPooling) != cap(tt.want.stopPooling) {
-				t.Errorf("NewClient() stopPooling capacity = %d, want %d", cap(got.stopPooling), cap(tt.want.stopPooling))
-			}
-			if cap(got.transportClosed) != cap(tt.want.transportClosed) {
-				t.Errorf("NewClient() transportClosed capacity = %d, want %d", cap(got.transportClosed), cap(tt.want.transportClosed))
-			}
-
-			// Проверяем поддерживаемые транспорты
-			if len(got.supportedTransports) != len(tt.want.supportedTransports) {
-				t.Errorf("NewClient() supportedTransports count = %d, want %d", len(got.supportedTransports), len(tt.want.supportedTransports))
-			}
-			for k, v := range tt.want.supportedTransports {
-				if _, ok := got.supportedTransports[k]; !ok {
-					t.Errorf("NewClient() supportedTransports missing key %v", k)
-				}
-				if reflect.TypeOf(got.supportedTransports[k]) != reflect.TypeOf(v) {
-					t.Errorf("NewClient() supportedTransports[%v] type = %T, want %T", k, got.supportedTransports[k], v)
-				}
-			}
-
-			// Проверяем транспорт по умолчанию
-			if tt.want.transport == nil {
-				if got.transport != got.supportedTransports[engineio_v4.TransportPolling] {
-					t.Errorf("NewClient() default transport is not polling")
-				}
+			if tt.wantErr {
+				assert.Error(t, err)
 			} else {
-				if got.transport != tt.want.transport {
-					t.Errorf("NewClient() transport = %v, want %v", got.transport, tt.want.transport)
-				}
+				assert.NoError(t, err)
+			}
+
+			if got == nil || tt.want == nil {
+				require.Equal(t, got, tt.want)
+				return
+			}
+
+			// Common fields check
+			assert.Equal(t, got.url, tt.want.url)
+			assert.IsType(t, got.log, tt.want.log)
+			assert.IsType(t, got.parser, tt.want.parser)
+			assert.Equal(t, got.reconnectAttempts, tt.want.reconnectAttempts)
+			assert.Equal(t, got.reconnectWait, tt.want.reconnectWait)
+			assert.Equal(t, cap(got.stopPooling), cap(tt.want.stopPooling))
+			assert.IsType(t, cap(got.transportClosed), cap(tt.want.transportClosed))
+			assert.Len(t, got.supportedTransports, len(tt.want.supportedTransports))
+
+			for k, v := range tt.want.supportedTransports {
+				assert.Contains(t, got.supportedTransports, k)
+				assert.IsType(t, v, got.supportedTransports[k])
+			}
+			assert.Len(t, got.supportedTransports, len(tt.want.supportedTransports))
+
+			// Default transport
+			if tt.want.transport == nil {
+				assert.Equal(t, got.supportedTransports[engineio_v4.TransportPolling], got.transport)
+			} else {
+				assert.Equal(t, tt.want.transport, got.transport)
 			}
 		})
 	}

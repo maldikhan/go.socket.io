@@ -19,6 +19,9 @@ func (p *EngineIOV4Parser) Parse(data []byte) (*engineio_v4.Message, error) {
 }
 
 func (p *EngineIOV4Parser) Serialize(msg *engineio_v4.Message) ([]byte, error) {
+	if len(msg.Data) > 64*1024*1024 { // 64 MB limit
+		return nil, errors.New("message data too large")
+	}
 	packet := make([]byte, 1, len(msg.Data)+1)
 	packet[0] = byte(msg.Type) + 0x30
 	return append(packet, msg.Data...), nil

@@ -94,6 +94,17 @@ func TestEngineIOV4Parser_Serialize(t *testing.T) {
 			want:    []byte(":test"),
 			wantErr: nil,
 		},
+		{
+			name: "Veeery long message",
+			input: &engineio_v4.Message{
+				Type: engineio_v4.EngineIOPacket(10),
+				Data: func() []byte {
+					return make([]byte, 65*1024*1024)
+				}(),
+			},
+			want:    nil,
+			wantErr: errors.New("message data too large"),
+		},
 	}
 
 	for _, tt := range tests {

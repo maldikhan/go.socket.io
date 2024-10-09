@@ -185,7 +185,7 @@ client.On("error", func() {
 
 **Important Note:** Emitting events is only possible after a connection to the namespace has been established (i.e., after receiving the 'connect' event). When calling `Emit` for a namespace that hasn't established a connection yet, the `Emit` method will block until the 'connect' event is received from that namespace.
 
-Simple event emission:
+#### Simple event emission
 
 ```go
 err := client.Emit("eventName", "eventData")
@@ -194,7 +194,7 @@ if err != nil {
 }
 ```
 
-Emitting events with acknowledgement and timeout:
+#### Emitting events with acknowledgement and timeout
 
 ```go
 err = client.Emit("delay", 1000,

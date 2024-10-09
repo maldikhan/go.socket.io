@@ -3,10 +3,11 @@ package socketio_v5_client
 import (
 	"errors"
 	"net/url"
-	"reflect"
 	"testing"
 
 	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	mocks "github.com/maldikhan/go.socket.io/socket.io/v5/client/mocks"
 	socketio_v5_parser "github.com/maldikhan/go.socket.io/socket.io/v5/parser/default"
@@ -151,58 +152,34 @@ func TestNewClient(t *testing.T) {
 			}
 
 			got, err := NewClient(tt.options...)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("NewClient() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
+			require.Equal(t, tt.wantErr, err != nil)
+
 			if got == nil || tt.want == nil {
-				if got == tt.want {
-					return
-				}
-				t.Errorf("NewClient() got = %v, want %v", got, tt.want)
+				require.Equal(t, tt.want, got)
 				return
 			}
 
 			// Check main properties
-			if !reflect.DeepEqual(got.handshakeData, tt.want.handshakeData) {
-				t.Errorf("NewClient() handshakeData = %v, want %v", got.handshakeData, tt.want.handshakeData)
-			}
+			assert.Equal(t, tt.want.handshakeData, got.handshakeData)
 			// Check NS by name only
 			for k, v := range got.namespaces {
-				want, have := tt.want.namespaces[k]
-				if !have || want.name != v.name {
-					t.Errorf("NewClient() namespaces[%s] got, but not expected", k)
+				if assert.Contains(t, tt.want.namespaces, k) {
+					assert.Equal(t, v.name, tt.want.namespaces[k].name)
 				}
-			}
-			for k, v := range tt.want.namespaces {
-				want, have := got.namespaces[k]
-				if !have || want.name != v.name {
-					t.Errorf("NewClient() namespaces[%s] expected, but not got", k)
-				}
-			}
 
-			if !reflect.DeepEqual(got.ackCallbacks, tt.want.ackCallbacks) {
-				t.Errorf("NewClient() ackCallbacks = %v, want %v", got.ackCallbacks, tt.want.ackCallbacks)
 			}
-			if reflect.TypeOf(got.logger) != reflect.TypeOf(tt.want.logger) {
-				t.Errorf("NewClient() logger type = %T, want %T", got.logger, tt.want.logger)
-			}
-			if reflect.TypeOf(got.timer) != reflect.TypeOf(tt.want.timer) {
-				t.Errorf("NewClient() timer type = %T, want %T", got.timer, tt.want.timer)
-			}
-			if reflect.TypeOf(got.parser) != reflect.TypeOf(tt.want.parser) {
-				t.Errorf("NewClient() parser type = %T, want %T", got.parser, tt.want.parser)
-			}
+			assert.Len(t, got.namespaces, len(tt.want.namespaces))
+			assert.Equal(t, got.ackCallbacks, tt.want.ackCallbacks)
+			assert.IsType(t, tt.want.logger, got.logger)
+			assert.IsType(t, tt.want.timer, got.timer)
+			assert.IsType(t, tt.want.parser, got.parser)
+
 			if got.engineio != tt.want.engineio {
 				// A bit cheat to not mock default engine io client
-				if tt.want.engineio != nil {
-					t.Errorf("NewClient() engineio = %v, want %v", got.engineio, tt.want.engineio)
-				}
+				assert.Nil(t, tt.want.engineio)
 			}
 			// For NS compare names only
-			if got.defaultNs.name != tt.want.defaultNs.name {
-				t.Errorf("NewClient() defaultNs = %v, want %v", got.defaultNs, tt.want.defaultNs)
-			}
+			assert.Equal(t, got.defaultNs.name, tt.want.defaultNs.name)
 		})
 	}
 }
