@@ -1,4 +1,4 @@
-module github.com/hakankutluay/go.socket.io
+module github.com/maldikhan/go.socket.io
 
 go 1.18
 
