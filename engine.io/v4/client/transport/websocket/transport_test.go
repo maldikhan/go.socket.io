@@ -130,6 +130,12 @@ func TestTransport_buildWsUrl(t *testing.T) {
 			sid:      "test-sid",
 			expected: "wss://example.com/socket.io/?EIO=4&sid=test-sid&transport=websocket",
 		},
+		{
+			name:     "HTTPS URL with query",
+			url:      &url.URL{Scheme: "https", Host: "example.com", Path: "/socket.io/", RawQuery: "query=foo"},
+			sid:      "test-sid",
+			expected: "wss://example.com/socket.io/?EIO=4&query=foo&sid=test-sid&transport=websocket",
+		},
 	}
 
 	for _, tt := range tests {
