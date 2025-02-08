@@ -65,8 +65,7 @@ func (c *Transport) buildWsUrl() *url.URL {
 
 	q, err := url.ParseQuery(c.url.RawQuery)
 	if err != nil {
-		c.log.Errorf("buildWsUrl: %s", err)
-		return nil
+		c.log.Errorf("malformed query on url: %s", err)
 	}
 
 	query := wsURL.Query()
