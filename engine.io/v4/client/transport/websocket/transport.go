@@ -63,7 +63,16 @@ func (c *Transport) buildWsUrl() *url.URL {
 		wsURL.Scheme = "wss"
 	}
 
+	q, err := url.ParseQuery(c.url.RawQuery)
+	if err != nil {
+		c.log.Errorf("malformed query on url: %s", err)
+	}
+
 	query := wsURL.Query()
+
+	for k, v := range q {
+		query[k] = v
+	}
 
 	query.Set("transport", "websocket")
 	query.Set("EIO", "4")

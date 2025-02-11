@@ -112,11 +112,16 @@ func TestTransport_SetHandshake(t *testing.T) {
 func TestTransport_buildWsUrl(t *testing.T) {
 	t.Parallel()
 
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	tests := []struct {
-		name     string
-		url      *url.URL
-		sid      string
-		expected string
+		name                       string
+		url                        *url.URL
+		sid                        string
+		expected                   string
+		expectedErrorLog           string
+		expectedErrorLogParameters []interface{}
 	}{
 		{
 			name:     "HTTP URL",
@@ -130,13 +135,34 @@ func TestTransport_buildWsUrl(t *testing.T) {
 			sid:      "test-sid",
 			expected: "wss://example.com/socket.io/?EIO=4&sid=test-sid&transport=websocket",
 		},
+		{
+			name:     "HTTPS URL with query",
+			url:      &url.URL{Scheme: "https", Host: "example.com", Path: "/socket.io/", RawQuery: "query=foo"},
+			sid:      "test-sid",
+			expected: "wss://example.com/socket.io/?EIO=4&query=foo&sid=test-sid&transport=websocket",
+		},
+		{
+			name:                       "HTTPS URL with malformed query",
+			url:                        &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/", RawQuery: "key1=value1&key2=%ZZ"},
+			sid:                        "test-sid",
+			expected:                   "ws://example.com/socket.io/?EIO=4&key1=value1&sid=test-sid&transport=websocket",
+			expectedErrorLog:           "malformed query on url: %s",
+			expectedErrorLogParameters: []interface{}{gomock.Any()},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+			if tt.expectedErrorLog != "" {
+				mockLogger.EXPECT().Errorf(tt.expectedErrorLog, tt.expectedErrorLogParameters...).Times(1)
+			}
+
 			transport := &Transport{
 				url: tt.url,
 				sid: tt.sid,
+				log: mockLogger,
 			}
 			result := transport.buildWsUrl()
 			assert.Equal(t, tt.expected, result.String())
