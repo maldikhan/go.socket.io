@@ -2,6 +2,8 @@
 
 A Go implementation of the Socket.IO v5 client, compatible with Socket.IO v4 servers.
 
+![logo](https://github.com/user-attachments/assets/f2fd04b7-044d-4b78-88da-2f260ca24859)
+
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/maldikhan/go.socket.io/blob/main/LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/maldikhan/go.socket.io#latest)](https://goreportcard.com/report/github.com/maldikhan/go.socket.io)
 [![codecov](https://codecov.io/github/maldikhan/go.socket.io/graph/badge.svg?token=HQTEDRMY81)](https://codecov.io/github/maldikhan/go.socket.io)
