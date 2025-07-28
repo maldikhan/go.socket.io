@@ -134,6 +134,27 @@ if err != nil {
 }
 ```
 
+If you need to send auth headers to the server you can use SetHandshake method before connection establishment:
+
+```go
+
+accessToken := "your_access_token"
+
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+
+client.SetHandshakeData(
+    map[string]interface{}{
+        "access_token": accessToken,
+    },
+)
+
+err := client.Connect(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
 This approach allows you to set up connection handlers inline with the connection call, which can be more convenient in some cases. It's particularly useful when you want to perform specific actions immediately after a successful connection, such as joining rooms or emitting initial events.
 
 Remember that these callbacks will be called every time a connection is established, including after automatic reconnects if your client is configured to use them.
