@@ -82,7 +82,7 @@ func main() {
 - Authorization support
 - Namespaces support (limited)
 - Modular design for easy component replacement
-- Fast JSON parsing with jsoniter
+- Fast JSON parsing with jsoniter (with [custom parser](https://github.com/maldikhan/go.socket.io-parser.jsoniter))
 
 ## Installation
 
@@ -134,7 +134,7 @@ if err != nil {
 }
 ```
 
-If you need to send auth headers to the server you can use SetHandshake method before connection establishment:
+You can also send the custom handshake data to the server:
 
 ```go
 
@@ -268,7 +268,7 @@ err := client.Close()
 - `WithDefaultNamespace(string)`: Set the default namespace
 - `WithLogger(Logger)`: Use a custom logger
 - `WithTimer(Timer)`: Use a custom timer
-- `WithParser(Parser)`: Use a custom parser (see [jsoniter fast default event parser implementation](./socket.io/v5/parser/default/jsoniter/))
+- `WithParser(Parser)`: Use a custom parser (see [jsoniter fast default event parser implementation](https://github.com/maldikhan/go.socket.io-parser.jsoniter))
 
 ### Engine.IO Client Options
 
