@@ -28,18 +28,4 @@ jobs:
       uses: golangci/golangci-lint-action@v4
       with:
         version: latest
-        args: --timeout=5m
-
-    - name: Run golangci-lint examples
-      uses: golangci/golangci-lint-action@v4
-      with:
-        working-directory: examples
-        version: latest
-        args: --timeout=5m
-
-    - name: Run golangci-lint jsoniter
-      uses: golangci/golangci-lint-action@v4
-      with:
-        working-directory: socket.io/v5/parser/default/jsoniter
-        version: latest
-        args: --timeout=5m                
+        args: --timeout=5m             

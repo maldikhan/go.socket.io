@@ -43,7 +43,7 @@ import (
  "log"
  "time"
 
- socketio "github.com/maldikhan/go.socket.io"
+ socketio "github.com/maldikhan/go.socket.io/socket.io/v5/client"
 )
 
 func main() {

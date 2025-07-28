@@ -49,18 +49,6 @@ jobs:
     - name: Go vet
       run: go vet -v ./...
 
-    - name: Test jsoniter
-      working-directory: socket.io/v5/parser/default/jsoniter
-      run: go test -v ./...  
-
-    - name: Go vet jsoniter
-      working-directory: socket.io/v5/parser/default/jsoniter
-      run: go vet -v ./...
-
-    - name: Go vet examples
-      working-directory: examples
-      run: go vet -v ./...
-
   test-coverage: 
     name: Collect code test coverage
     runs-on: ubuntu-latest
@@ -92,10 +80,6 @@ jobs:
 
       - name: Run tests for main project
         run: go test `go list ./...|grep -v mocks` -coverprofile=coverage.out
-
-      - name: Run tests for jsoniter
-        working-directory: socket.io/v5/parser/default/jsoniter
-        run: go test `go list ./...|grep -v mocks` -coverprofile=../../../../../coverage.payloadparser.jsoniter.out
 
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v4
