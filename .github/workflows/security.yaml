@@ -46,18 +46,7 @@ jobs:
       - name: Run gosec on main project
         run: |
           go mod download
-          gosec -fmt=sarif -out=gosec.main.sarif -exclude-dir=socket.io/v5/parser/default/jsoniter -exclude-dir=examples ./...
-      - name: Run gosec on examples
-        run: |
-          cd examples
-          go mod download
-          gosec -fmt=sarif -out=../gosec.examples.sarif ./...
-      
-      - name: Run gosec on jsoniter parser
-        run: |
-          cd socket.io/v5/parser/default/jsoniter
-          go mod download
-          gosec -fmt=sarif -out=../../../../../gosec.payloayparser.jsoniter.sarif ./...    
+          gosec -fmt=sarif -out=gosec.main.sarif ./...
 
       - name: Upload SARIF file
         if: github.event_name != 'pull_request' && github.actor != 'nektos/act'
@@ -102,17 +91,5 @@ jobs:
 
       - name: Run govulncheck on main project
         run: |
-          go mod download
-          govulncheck ./...
-
-      - name: Run govulncheck on examples
-        run: |
-          cd examples
-          go mod download
-          govulncheck ./...
-      
-      - name: Run govulncheck on jsoniter parser
-        run: |
-          cd socket.io/v5/parser/default/jsoniter
           go mod download
           govulncheck ./...

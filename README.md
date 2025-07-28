@@ -43,7 +43,7 @@ import (
  "log"
  "time"
 
- socketio "github.com/maldikhan/go.socket.io"
+ socketio "github.com/maldikhan/go.socket.io/socket.io/v5/client"
 )
 
 func main() {
@@ -74,6 +74,8 @@ func main() {
 }
 ```
 
+More usage examples can be found in the [examples](https://github.com/maldikhan/go.socket.io-examples) project.
+
 ## Features
 
 - Socket.IO v5 protocol support
@@ -82,7 +84,7 @@ func main() {
 - Authorization support
 - Namespaces support (limited)
 - Modular design for easy component replacement
-- Fast JSON parsing with jsoniter
+- Fast JSON parsing with jsoniter (with [custom parser](https://github.com/maldikhan/go.socket.io-parser.jsoniter))
 
 ## Installation
 
@@ -129,6 +131,27 @@ err := client.Connect(ctx,
         fmt.Println("This is another on-connect callback")
     },
 )
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+You can also send the custom handshake data to the server:
+
+```go
+
+accessToken := "your_access_token"
+
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+
+client.SetHandshakeData(
+    map[string]interface{}{
+        "access_token": accessToken,
+    },
+)
+
+err := client.Connect(ctx)
 if err != nil {
     log.Fatal(err)
 }
@@ -247,7 +270,7 @@ err := client.Close()
 - `WithDefaultNamespace(string)`: Set the default namespace
 - `WithLogger(Logger)`: Use a custom logger
 - `WithTimer(Timer)`: Use a custom timer
-- `WithParser(Parser)`: Use a custom parser (see [jsoniter fast default event parser implementation](./socket.io/v5/parser/default/jsoniter/))
+- `WithParser(Parser)`: Use a custom parser (see [jsoniter fast default event parser implementation](https://github.com/maldikhan/go.socket.io-parser.jsoniter))
 
 ### Engine.IO Client Options
 
