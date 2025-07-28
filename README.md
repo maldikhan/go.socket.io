@@ -74,6 +74,8 @@ func main() {
 }
 ```
 
+More usage examples can be found in the [examples](https://github.com/maldikhan/go.socket.io-examples) project.
+
 ## Features
 
 - Socket.IO v5 protocol support
