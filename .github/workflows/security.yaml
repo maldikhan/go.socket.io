@@ -46,7 +46,7 @@ jobs:
       - name: Run gosec on main project
         run: |
           go mod download
-          gosec -fmt=sarif -out=gosec.main.sarif
+          gosec -fmt=sarif -out=gosec.main.sarif ./...
 
       - name: Upload SARIF file
         if: github.event_name != 'pull_request' && github.actor != 'nektos/act'
