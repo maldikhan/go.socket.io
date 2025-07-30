@@ -38,6 +38,27 @@ func TestClientOn(t *testing.T) {
 	assert.NotNil(t, client.defaultNs.handlers["test_event"][0])
 }
 
+func TestClientOnAny(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockParser := mocks.NewMockParser(ctrl)
+
+	client := &Client{
+		defaultNs: &namespace{
+			client:   &Client{parser: mockParser},
+			handlers: make(map[string][]func([]interface{})),
+		},
+	}
+
+	handler := func(event string, args []interface{}) {}
+
+	client.OnAny(handler)
+
+	assert.Len(t, client.defaultNs.anyHandlers, 1)
+	assert.NotNil(t, client.defaultNs.anyHandlers)
+}
+
 func TestNamespaceOn(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -58,6 +79,25 @@ func TestNamespaceOn(t *testing.T) {
 
 	assert.Len(t, ns.handlers["test_event"], 1)
 	assert.NotNil(t, ns.handlers["test_event"][0])
+}
+
+func TestNamespaceOnAny(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockParser := mocks.NewMockParser(ctrl)
+
+	ns := &namespace{
+		client:   &Client{parser: mockParser},
+		handlers: make(map[string][]func([]interface{})),
+	}
+
+	handler := func(event string, args []interface{}) {}
+
+	ns.OnAny(handler)
+
+	assert.Len(t, ns.anyHandlers, 1)
+	assert.NotNil(t, ns.anyHandlers)
 }
 
 func TestClientOnMessage(t *testing.T) {
@@ -182,6 +222,34 @@ func TestClientHandleEvent(t *testing.T) {
 		client.handleEvent(ns, &socketio_v5.Event{Name: "test_event"})
 
 		assert.True(t, <-handlerCalled)
+	})
+
+	t.Run("With Handlers and AnyHandlers", func(t *testing.T) {
+		handlerCalled := make(chan bool)
+		anyHandlerCalled := make(chan interface{})
+		ns.handlers["test_event"] = []func([]interface{}){
+			func(args []interface{}) {
+				handlerCalled <- true
+			},
+		}
+		ns.anyHandlers = []func(string, []interface{}){
+			func(event string, args []interface{}) {
+				anyHandlerCalled <- event
+			},
+		}
+
+		client.handleEvent(ns, &socketio_v5.Event{Name: "test_event"})
+		assert.True(t, <-handlerCalled)
+		assert.Equal(t, <-anyHandlerCalled, "test_event")
+
+		client.handleEvent(ns, &socketio_v5.Event{Name: "test_event2"})
+		select {
+		case <-handlerCalled:
+			t.Error("handler should not be called")
+		case <-time.After(100 * time.Millisecond):
+			assert.True(t, true)
+		}
+		assert.Equal(t, <-anyHandlerCalled, "test_event2")
 	})
 }
 

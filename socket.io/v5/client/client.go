@@ -28,8 +28,9 @@ type Client struct {
 type namespace struct {
 	client *Client
 
-	name     string
-	handlers map[string][]func([]interface{})
+	name        string
+	handlers    map[string][]func([]interface{})
+	anyHandlers []func(string, []interface{})
 
 	waitConnected chan struct{}
 	hadConnected  sync.Once
