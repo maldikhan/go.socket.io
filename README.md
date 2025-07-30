@@ -185,6 +185,26 @@ client.On("result", func(args []interface{}) {
 })
 ```
 
+#### Catch-all handlers support
+
+```go
+// Typed event
+client.OnAny(func(eventName string, operation string, result int) {
+ // Process event ["result", "operationtype", 123]
+ fmt.Printf("Event: %s, Operation: %s, Result: %d\n", eventName, operation, result)
+})
+
+// Raw event
+client.OnAny(func(args []interface{}) {
+ // Extract event name   
+ eventName := args[0].(string)   
+ // Extract raw JSON data
+ if arg0, ok := args[1].(json.RawMessage); ok {
+  // Process raw JSON
+ } 
+})
+```
+
 #### Internal events
 
 The library allows you to handle socket.io internal events:

@@ -6,9 +6,20 @@ func (c *Client) On(event string, handler interface{}) {
 	c.defaultNs.On(event, handler)
 }
 
+func (c *Client) OnAny(handler interface{}) {
+	c.defaultNs.OnAny(handler)
+}
+
 func (n *namespace) On(event string, handler interface{}) {
 	n.handlers[event] = append(
 		n.handlers[event],
+		n.client.parser.WrapCallback(handler),
+	)
+}
+
+func (n *namespace) OnAny(handler interface{}) {
+	n.anyHandlers = append(
+		n.anyHandlers,
 		n.client.parser.WrapCallback(handler),
 	)
 }
@@ -89,9 +100,16 @@ func (c *Client) handleConnect(ns *namespace, payload interface{}) {
 func (c *Client) handleEvent(ns *namespace, event *socketio_v5.Event) {
 
 	handlers, ok := ns.handlers[event.Name]
-	if !ok {
+	if !ok && len(ns.anyHandlers) == 0 {
 		c.logger.Infof("No handlers for event: %s", event.Name)
 		return
+	}
+
+	if len(ns.anyHandlers) > 0 {
+		params := append([]interface{}{event.Name}, event.Payloads...)
+		for _, handler := range ns.anyHandlers {
+			go handler(params)
+		}
 	}
 
 	for _, handler := range handlers {
