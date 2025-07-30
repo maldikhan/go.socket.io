@@ -189,7 +189,7 @@ client.On("result", func(args []interface{}) {
 
 ```go
 // Args are parser-specific raw JSON params
-client.OnAny(func(eventName string, args []interface{} {  
+client.OnAny(func(eventName string, args []interface{}) {  
  // Extract raw JSON data
  if arg0, ok := args[0].(json.RawMessage); ok {
   // Process raw JSON
