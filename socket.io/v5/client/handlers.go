@@ -106,7 +106,7 @@ func (c *Client) handleEvent(ns *namespace, event *socketio_v5.Event) {
 	}
 
 	if len(ns.anyHandlers) > 0 {
-		params := append([]interface{}{event.Name}, event.Payloads...)
+		params := append([]interface{}{[]byte(event.Name)}, event.Payloads...)
 		for _, handler := range ns.anyHandlers {
 			go handler(params)
 		}
