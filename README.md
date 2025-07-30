@@ -185,23 +185,20 @@ client.On("result", func(args []interface{}) {
 })
 ```
 
-#### Catch-all handlers support
+#### Catch-all handlers
 
 ```go
-// Typed event
-client.OnAny(func(eventName string, operation string, result int) {
- // Process event ["result", "operationtype", 123]
- fmt.Printf("Event: %s, Operation: %s, Result: %d\n", eventName, operation, result)
-})
-
-// Raw event
-client.OnAny(func(args []interface{}) {
- // Extract event name   
- eventName := args[0].(string)   
+// Args are parser-specific raw JSON params
+client.OnAny(func(eventName string, args []interface{} {  
  // Extract raw JSON data
- if arg0, ok := args[1].(json.RawMessage); ok {
+ if arg0, ok := args[0].(json.RawMessage); ok {
   // Process raw JSON
- } 
+ }
+ // Extract raw JSON data
+ if arg1, ok := args[1].(json.RawMessage); ok {
+  // Process raw JSON
+ }
+ ...
 })
 ```
 
