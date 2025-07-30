@@ -51,10 +51,7 @@ func TestClientOnAny(t *testing.T) {
 		},
 	}
 
-	handler := func(args ...interface{}) {}
-	wrappedHandler := func([]interface{}) {}
-
-	mockParser.EXPECT().WrapCallback(gomock.Any()).Return(wrappedHandler)
+	handler := func(event string, args []interface{}) {}
 
 	client.OnAny(handler)
 
@@ -95,10 +92,7 @@ func TestNamespaceOnAny(t *testing.T) {
 		handlers: make(map[string][]func([]interface{})),
 	}
 
-	handler := func(args ...interface{}) {}
-	wrappedHandler := func([]interface{}) {}
-
-	mockParser.EXPECT().WrapCallback(gomock.Any()).Return(wrappedHandler)
+	handler := func(event string, args []interface{}) {}
 
 	ns.OnAny(handler)
 
@@ -238,9 +232,9 @@ func TestClientHandleEvent(t *testing.T) {
 				handlerCalled <- true
 			},
 		}
-		ns.anyHandlers = []func([]interface{}){
-			func(args []interface{}) {
-				anyHandlerCalled <- args[0]
+		ns.anyHandlers = []func(string, []interface{}){
+			func(event string, args []interface{}) {
+				anyHandlerCalled <- event
 			},
 		}
 

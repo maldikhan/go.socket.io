@@ -30,7 +30,7 @@ type namespace struct {
 
 	name        string
 	handlers    map[string][]func([]interface{})
-	anyHandlers []func([]interface{})
+	anyHandlers []func(string, []interface{})
 
 	waitConnected chan struct{}
 	hadConnected  sync.Once

@@ -6,7 +6,7 @@ func (c *Client) On(event string, handler interface{}) {
 	c.defaultNs.On(event, handler)
 }
 
-func (c *Client) OnAny(handler interface{}) {
+func (c *Client) OnAny(handler func(string, []interface{})) {
 	c.defaultNs.OnAny(handler)
 }
 
@@ -17,10 +17,10 @@ func (n *namespace) On(event string, handler interface{}) {
 	)
 }
 
-func (n *namespace) OnAny(handler interface{}) {
+func (n *namespace) OnAny(handler func(string, []interface{})) {
 	n.anyHandlers = append(
 		n.anyHandlers,
-		n.client.parser.WrapCallback(handler),
+		handler,
 	)
 }
 
@@ -106,9 +106,8 @@ func (c *Client) handleEvent(ns *namespace, event *socketio_v5.Event) {
 	}
 
 	if len(ns.anyHandlers) > 0 {
-		params := append([]interface{}{[]byte(event.Name)}, event.Payloads...)
 		for _, handler := range ns.anyHandlers {
-			go handler(params)
+			go handler(event.Name, event.Payloads)
 		}
 	}
 
