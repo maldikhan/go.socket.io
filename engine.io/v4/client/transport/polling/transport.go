@@ -76,10 +76,12 @@ func (c *Transport) Run(
 }
 
 func (c *Transport) Stop() error {
-	if atomic.LoadUint32(&c.stopped) != 0 {
+	// CAS ensures only one concurrent Stop() call proceeds;
+	// subsequent calls see stopped==1 and return immediately.
+	if !atomic.CompareAndSwapUint32(&c.stopped, 0, 1) {
 		return nil
 	}
-	// Use non-blocking send: if pollingLoop already exited (e.g. via
+	// Non-blocking send: if pollingLoop already exited (e.g. via
 	// ctx.Done()), nobody is reading from stopPooling and a blocking
 	// send would deadlock.
 	select {
