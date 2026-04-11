@@ -46,7 +46,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// Run main loop
 	c.messages = make(chan []byte, 100)
-	go c.messageLoop(c.messages)
+	go c.messageLoop(ctx, c.messages)
 
 	// Run transport
 	c.transportClosed = make(chan error, 1)
@@ -69,7 +69,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (c *Client) messageLoop(messages <-chan []byte) {
+func (c *Client) messageLoop(ctx context.Context, messages <-chan []byte) {
 	if messages == nil {
 		c.log.Errorf("messages channel is nil, can't read transport messages")
 		return
@@ -84,7 +84,7 @@ func (c *Client) messageLoop(messages <-chan []byte) {
 			if err != nil {
 				c.log.Errorf("handle packet error: %s", err)
 			}
-		case <-c.ctx.Done():
+		case <-ctx.Done():
 			c.log.Warnf("context done, engine.io client stopped processing messages")
 			return
 		}
@@ -289,9 +289,9 @@ func (c *Client) On(event string, handler func([]byte)) {
 }
 
 func (c *Client) Close() error {
-	c.transportMu.Lock()
+	c.transportMu.RLock()
 	t := c.transport
-	c.transportMu.Unlock()
+	c.transportMu.RUnlock()
 
 	err := t.Stop()
 	if err != nil {

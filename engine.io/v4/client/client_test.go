@@ -172,7 +172,7 @@ func TestClient_messageLoop(t *testing.T) {
 	t.Run("Handle packet", func(t *testing.T) {
 		mockParser.EXPECT().Parse([]byte("test")).Return(&engineio_v4.Message{Type: engineio_v4.PacketMessage}, nil)
 
-		go client.messageLoop(client.messages)
+		go client.messageLoop(ctx, client.messages)
 		client.messages <- []byte("test")
 		time.Sleep(10 * time.Millisecond)
 	})
@@ -181,7 +181,7 @@ func TestClient_messageLoop(t *testing.T) {
 		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).Times(2)
 		mockParser.EXPECT().Parse([]byte("error")).Return(nil, errors.New("parse error"))
 
-		go client.messageLoop(client.messages)
+		go client.messageLoop(ctx, client.messages)
 		client.messages <- []byte("error")
 		time.Sleep(10 * time.Millisecond)
 	})
@@ -189,14 +189,14 @@ func TestClient_messageLoop(t *testing.T) {
 	t.Run("Context done", func(t *testing.T) {
 		mockLogger.EXPECT().Warnf("context done, engine.io client stopped processing messages").AnyTimes()
 		messages := make(chan []byte, 1)
-		go client.messageLoop(messages)
+		go client.messageLoop(ctx, messages)
 		cancel()
 		time.Sleep(10 * time.Millisecond)
 	})
 
 	t.Run("NIL messages channel", func(t *testing.T) {
 		mockLogger.EXPECT().Errorf("messages channel is nil, can't read transport messages")
-		client.messageLoop(nil)
+		client.messageLoop(ctx, nil)
 	})
 }
 
@@ -366,6 +366,29 @@ func TestClient_handleHandshake(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, mockTransportWs, transportDuringCallback,
 			"afterConnect must be called after transport upgrade")
+	})
+
+	t.Run("Handshake with upgrade failure", func(t *testing.T) {
+		handshakeResp := &engineio_v4.HandshakeResponse{
+			Sid:          "test-sid",
+			PingInterval: 25000,
+			PingTimeout:  5000,
+			Upgrades:     []string{"websocket"},
+		}
+		data, _ := json.Marshal(handshakeResp)
+
+		client.transport = mockTransportPolling
+
+		mockTransportPolling.EXPECT().SetHandshake(handshakeResp)
+		mockTransportWs.EXPECT().SetHandshake(handshakeResp)
+		mockTransportPolling.EXPECT().Stop().Return(errors.New("stop failed"))
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any())
+
+		client.hadHandshake = sync.Once{}
+		client.waitHandshake = make(chan struct{})
+		err := client.handleHandshake(data)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "stop failed")
 	})
 
 	t.Run("Successful handshake with wrong upgrade", func(t *testing.T) {
