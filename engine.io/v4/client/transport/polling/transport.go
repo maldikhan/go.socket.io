@@ -11,6 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	// Note: we use atomic.LoadUint32/StoreUint32 instead of atomic.Bool
+	// to maintain compatibility with Go 1.18 (atomic.Bool requires Go 1.19).
+
 	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 )
 
@@ -27,7 +30,7 @@ type Transport struct {
 	onClose     chan<- error
 	stopPooling chan struct{}
 
-	stopped atomic.Bool
+	stopped uint32 // atomic; 0 = running, 1 = stopped
 }
 
 func (c *Transport) SetHandshake(handshake *engineio_v4.HandshakeResponse) {
@@ -73,10 +76,16 @@ func (c *Transport) Run(
 }
 
 func (c *Transport) Stop() error {
-	if c.stopped.Load() {
+	if atomic.LoadUint32(&c.stopped) != 0 {
 		return nil
 	}
-	c.stopPooling <- struct{}{}
+	// Use non-blocking send: if pollingLoop already exited (e.g. via
+	// ctx.Done()), nobody is reading from stopPooling and a blocking
+	// send would deadlock.
+	select {
+	case c.stopPooling <- struct{}{}:
+	default:
+	}
 	return nil
 }
 
@@ -94,14 +103,14 @@ func (c *Transport) pollingLoop() error {
 			}
 		case <-c.stopPooling:
 			c.log.Debugf("stop polling")
-			c.stopped.Store(true)
+			atomic.StoreUint32(&c.stopped, 1)
 			if c.onClose != nil {
 				c.onClose <- c.ctx.Err()
 			}
 			return nil
 		case <-c.ctx.Done():
 			c.log.Debugf("context done, stop http polling")
-			c.stopped.Store(true)
+			atomic.StoreUint32(&c.stopped, 1)
 			if c.onClose != nil {
 				c.onClose <- c.ctx.Err()
 			}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -324,6 +325,61 @@ func TestPollingLoop(t *testing.T) {
 
 		err := client.pollingLoop()
 		assert.ErrorContains(t, err, "pinger closed")
+	})
+}
+
+func TestSetHandshakeDefaultPingInterval(t *testing.T) {
+	t.Parallel()
+	client := &Transport{
+		pinger: time.NewTicker(time.Minute),
+	}
+
+	handshake := &engineio_v4.HandshakeResponse{
+		Sid:          "test-sid",
+		PingInterval: 0, // zero triggers default 10s interval
+	}
+
+	client.SetHandshake(handshake)
+	assert.Equal(t, "test-sid", client.sid)
+	assert.NotNil(t, client.pinger)
+}
+
+func TestStop(t *testing.T) {
+	t.Run("Stop when already stopped", func(t *testing.T) {
+		t.Parallel()
+
+		client := &Transport{
+			stopPooling: make(chan struct{}, 1),
+		}
+		atomic.StoreUint32(&client.stopped, 1)
+
+		// Should return immediately without sending to stopPooling
+		err := client.Stop()
+		assert.NoError(t, err)
+		assert.Equal(t, 0, len(client.stopPooling), "should not send to stopPooling when already stopped")
+	})
+
+	t.Run("Stop non-blocking when pollingLoop already exited", func(t *testing.T) {
+		t.Parallel()
+
+		// stopPooling is unbuffered and nobody is reading — Stop must not deadlock
+		client := &Transport{
+			stopPooling: make(chan struct{}),
+		}
+
+		done := make(chan struct{})
+		go func() {
+			err := client.Stop()
+			assert.NoError(t, err)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// Stop returned without blocking — correct
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("Stop() deadlocked on full/unread stopPooling channel")
+		}
 	})
 }
 
