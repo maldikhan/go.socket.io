@@ -62,6 +62,10 @@ func (c *Transport) Run(
 	c.url = url
 	c.messages = messagesChan
 	c.onClose = onClose
+	// Reset the stopped flag to allow transport reuse
+	atomic.StoreUint32(&c.stopped, 0)
+	// Reinitialize stopPooling channel to ensure fresh channel for new run
+	c.stopPooling = make(chan struct{}, 1)
 
 	go func() {
 		c.pinger.Stop()
