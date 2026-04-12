@@ -176,6 +176,11 @@ func (c *Transport) SendMessage(msg []byte) error {
 		return fmt.Errorf("error creating request: %w", err)
 	}
 	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
 	c.log.Debugf("receiveHttp: %s", resp.Status)
-	return err
+	return nil
 }

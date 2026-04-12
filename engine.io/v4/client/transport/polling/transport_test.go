@@ -596,6 +596,81 @@ func TestSendMessage(t *testing.T) {
 		err := client.SendMessage([]byte("test message"))
 		assert.Error(t, err)
 	})
+
+	t.Run("HTTP client error - no nil pointer dereference", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		client := &Transport{
+			log:        mockLogger,
+			httpClient: mockHTTPClient,
+			url:        &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:        "test-sid",
+			ctx:        ctx,
+		}
+
+		mockLogger.EXPECT().Debugf("sendHttp: %s", []byte("test message"))
+
+		expectedError := errors.New("network error")
+
+		mockHTTPClient.EXPECT().
+			Do(gomock.Any()).
+			Return(nil, expectedError)
+
+		// Should not panic even though resp is nil
+		err := client.SendMessage([]byte("test message"))
+		assert.Error(t, err)
+		assert.Equal(t, expectedError, err)
+	})
+
+	t.Run("Response body is closed and drained", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		client := &Transport{
+			log:        mockLogger,
+			httpClient: mockHTTPClient,
+			url:        &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:        "test-sid",
+			ctx:        ctx,
+		}
+
+		mockLogger.EXPECT().Debugf("sendHttp: %s", []byte("test message"))
+		mockLogger.EXPECT().Debugf("receiveHttp: %s", "200 OK")
+
+		// Track if the body was closed
+		bodyClosed := false
+		mockBody := &closeTrackingBody{
+			reader:      strings.NewReader("response data"),
+			onCloseFn: func() { bodyClosed = true },
+		}
+
+		mockResp := &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Body:       mockBody,
+		}
+
+		mockHTTPClient.EXPECT().
+			Do(gomock.Any()).
+			Return(mockResp, nil)
+
+		err := client.SendMessage([]byte("test message"))
+		assert.NoError(t, err)
+		assert.True(t, bodyClosed, "response body should be closed")
+	})
 }
 
 // errorReader is a helper type that always returns an error when Read is called
@@ -605,4 +680,21 @@ type errorReader struct {
 
 func (e *errorReader) Read(p []byte) (n int, err error) {
 	return 0, e.err
+}
+
+// closeTrackingBody is a helper type for testing that tracks if Close was called
+type closeTrackingBody struct {
+	reader    io.Reader
+	onCloseFn func()
+}
+
+func (c *closeTrackingBody) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
+}
+
+func (c *closeTrackingBody) Close() error {
+	if c.onCloseFn != nil {
+		c.onCloseFn()
+	}
+	return nil
 }
