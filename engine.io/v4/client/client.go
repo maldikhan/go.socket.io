@@ -174,6 +174,10 @@ func (c *Client) handleHandshake(data []byte) error {
 
 	c.sid = handshakeResp.Sid
 	if handshakeResp.PingInterval != 0 {
+		// Stop the old ticker if it exists to prevent goroutine leak
+		if c.pingInterval != nil {
+			c.pingInterval.Stop()
+		}
 		c.pingInterval = time.NewTicker(time.Duration(handshakeResp.PingInterval) * time.Millisecond)
 	}
 
@@ -347,6 +351,11 @@ func (c *Client) Close() error {
 	t := c.transport
 	c.transport = nil
 	c.transportMu.Unlock()
+
+	// Stop the ping ticker to prevent goroutine leak
+	if c.pingInterval != nil {
+		c.pingInterval.Stop()
+	}
 
 	if t == nil {
 		return nil

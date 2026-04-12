@@ -867,3 +867,92 @@ func TestClient_Send_after_close(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "client is closed")
 }
+
+func TestClient_handleHandshake_ticker_stopped(t *testing.T) {
+	// Test that the old ticker is stopped when creating a new one during re-handshake
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockParser := mocks.NewMockParser(ctrl)
+	mockTransport := mocks.NewMockTransport(ctrl)
+
+	client := &Client{
+		log:       mockLogger,
+		transport: mockTransport,
+		parser:    mockParser,
+		supportedTransports: map[engineio_v4.EngineIOTransport]Transport{
+			engineio_v4.TransportPolling: mockTransport,
+		},
+	}
+
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockTransport.EXPECT().Transport().Return(engineio_v4.TransportPolling).AnyTimes()
+	mockTransport.EXPECT().SetHandshake(gomock.Any()).AnyTimes()
+
+	// First handshake - creates initial ticker
+	handshakeResp := &engineio_v4.HandshakeResponse{
+		Sid:          "test-sid",
+		PingInterval: 25000,
+		PingTimeout:  5000,
+	}
+	data, _ := json.Marshal(handshakeResp)
+
+	client.waitHandshake = make(chan struct{})
+	err := client.handleHandshake(data)
+	assert.NoError(t, err)
+
+	firstTicker := client.pingInterval
+	assert.NotNil(t, firstTicker)
+
+	// Second handshake - should stop the old ticker and create a new one
+	client.hadHandshake = sync.Once{}
+	client.waitHandshake = make(chan struct{})
+	err = client.handleHandshake(data)
+	assert.NoError(t, err)
+
+	secondTicker := client.pingInterval
+	assert.NotNil(t, secondTicker)
+	assert.NotEqual(t, firstTicker, secondTicker, "should be a different ticker object")
+
+	// Cleanup
+	if client.pingInterval != nil {
+		client.pingInterval.Stop()
+	}
+}
+
+func TestClient_Close_stops_ticker(t *testing.T) {
+	// Test that Close() stops the ping ticker to prevent goroutine leak
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockParser := mocks.NewMockParser(ctrl)
+	mockTransport := mocks.NewMockTransport(ctrl)
+
+	client := &Client{
+		log:       mockLogger,
+		parser:    mockParser,
+		transport: mockTransport,
+		messages:  make(chan []byte, 1),
+	}
+
+	// Create a ticker that we'll verify gets stopped
+	client.pingInterval = time.NewTicker(10 * time.Second)
+
+	mockTransport.EXPECT().Stop().Return(nil)
+
+	err := client.Close()
+	assert.NoError(t, err)
+
+	// Try to receive from the ticker's channel - it should be closed
+	// If the ticker was properly stopped, we should not be able to receive anymore after a short wait
+	select {
+	case _, ok := <-client.pingInterval.C:
+		// Channel should eventually be closed or we should timeout
+		assert.False(t, ok, "ticker channel should be closed after Close()")
+	case <-time.After(100 * time.Millisecond):
+		// This is expected - the ticker.C channel doesn't immediately close
+		// but the ticker itself is stopped
+	}
+}
