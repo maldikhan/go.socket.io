@@ -3,6 +3,7 @@ package engineio_v4_client_transport
 import (
 	"context"
 	"net/url"
+	"sync"
 
 	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 )
@@ -19,6 +20,7 @@ type Transport struct {
 	messages    chan<- []byte
 	onClose     chan<- error
 	stopPooling chan struct{}
+	mu          sync.RWMutex
 }
 
 func (c *Transport) Transport() engineio_v4.EngineIOTransport {
@@ -56,10 +58,16 @@ func (c *Transport) RequestHandshake() error {
 }
 
 func (c *Transport) SetHandshake(handshake *engineio_v4.HandshakeResponse) {
+	c.mu.Lock()
 	c.sid = handshake.Sid
+	c.mu.Unlock()
 }
 
 func (c *Transport) buildWsUrl() *url.URL {
+	c.mu.RLock()
+	sid := c.sid
+	c.mu.RUnlock()
+
 	wsURL := &url.URL{
 		Scheme: "ws",
 		Host:   c.url.Host,
@@ -82,7 +90,7 @@ func (c *Transport) buildWsUrl() *url.URL {
 
 	query.Set("transport", "websocket")
 	query.Set("EIO", "4")
-	query.Set("sid", c.sid)
+	query.Set("sid", sid)
 
 	wsURL.RawQuery = query.Encode()
 	return wsURL
