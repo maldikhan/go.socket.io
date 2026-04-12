@@ -42,7 +42,7 @@ func NewClient(options ...EngineClientOption) (*Client, error) {
 	}
 
 	if client.parser == nil {
-		return nil, errors.New("logger is nil")
+		return nil, errors.New("parser is nil")
 	}
 
 	if len(client.supportedTransports) == 0 {
