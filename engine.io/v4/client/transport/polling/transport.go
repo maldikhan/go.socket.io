@@ -159,8 +159,13 @@ func (c *Transport) poll() error {
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	// Limit payload size: read one byte more than the limit to detect oversized payloads
-	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxPayloadSize+1))
+	// Limit payload size: read one byte more than the limit to detect oversized payloads.
+	// Guard against int64 overflow when maxPayloadSize is near math.MaxInt64.
+	readLimit := c.maxPayloadSize + 1
+	if readLimit <= 0 {
+		readLimit = c.maxPayloadSize // overflow: clamp to maxPayloadSize
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, readLimit))
 	if err != nil {
 		return err
 	}
