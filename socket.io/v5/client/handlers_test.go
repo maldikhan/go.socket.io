@@ -201,7 +201,7 @@ func TestClientOnMessage(t *testing.T) {
 		}
 
 		mockParser.EXPECT().Parse(gomock.Any()).Return(msg, nil)
-		mockLogger.EXPECT().Warnf(gomock.Any(), gomock.Any())
+		mockLogger.EXPECT().Warnf(gomock.Any(), gomock.Any(), gomock.Any())
 
 		// Should not panic and should log warning
 		client.onMessage([]byte("valid data"))
