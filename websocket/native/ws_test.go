@@ -208,7 +208,9 @@ func TestWebSocketConnection_ConcurrentSend(t *testing.T) {
 		ws := &WebSocketConnection{}
 		err = ws.Dial(ctx, url, origin)
 		require.NoError(t, err, "Dial should not return an error")
-		defer ws.Close()
+		defer func() {
+			_ = ws.Close()
+		}()
 
 		// Launch multiple goroutines sending messages concurrently
 		numGoroutines := 10
@@ -231,12 +233,13 @@ func TestWebSocketConnection_ConcurrentSend(t *testing.T) {
 
 		// Verify all messages were received (allowing for echo responses)
 		received := 0
+	Loop:
 		for {
 			select {
 			case <-receivedChan:
 				received++
 			case <-time.After(50 * time.Millisecond):
-				break
+				break Loop
 			}
 			if received >= numGoroutines {
 				break
