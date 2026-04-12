@@ -107,14 +107,20 @@ func (c *Transport) pollingLoop() error {
 			c.log.Debugf("stop polling")
 			atomic.StoreUint32(&c.stopped, 1)
 			if c.onClose != nil {
-				c.onClose <- c.ctx.Err()
+				select {
+				case c.onClose <- c.ctx.Err():
+				default:
+				}
 			}
 			return nil
 		case <-c.ctx.Done():
 			c.log.Debugf("context done, stop http polling")
 			atomic.StoreUint32(&c.stopped, 1)
 			if c.onClose != nil {
-				c.onClose <- c.ctx.Err()
+				select {
+				case c.onClose <- c.ctx.Err():
+				default:
+				}
 			}
 			return c.ctx.Err()
 		}
@@ -164,7 +170,11 @@ func (c *Transport) poll() error {
 	}
 	c.log.Debugf("receiveHttp: %s", string(body))
 
-	c.messages <- body
+	select {
+	case c.messages <- body:
+	case <-c.ctx.Done():
+		return c.ctx.Err()
+	}
 	return nil
 }
 
