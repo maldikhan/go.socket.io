@@ -33,6 +33,12 @@ func (c *Client) onMessage(data []byte) {
 		return
 	}
 
+	// Handle ACK packets first — they don't depend on namespace
+	if msg.Type == socketio_v5.PacketAck {
+		c.handleAck(msg.Event, *msg.AckId)
+		return
+	}
+
 	// Safely read namespace under RLock to prevent race condition
 	c.mutex.RLock()
 	ns := c.namespaces[msg.NS]
@@ -57,8 +63,6 @@ func (c *Client) onMessage(data []byte) {
 		c.handleConnect(ns, msg.Payload)
 	case socketio_v5.PacketEvent:
 		c.handleEvent(ns, msg.Event)
-	case socketio_v5.PacketAck:
-		c.handleAck(msg.Event, *msg.AckId)
 	case socketio_v5.PacketConnectError:
 		c.handleConnectError(ns, msg.Payload)
 		c.logger.Errorf("Connect error: %v", *msg.ErrorMessage)
