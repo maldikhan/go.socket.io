@@ -30,7 +30,8 @@ type Transport struct {
 	onClose     chan<- error
 	stopPooling chan struct{}
 
-	stopped uint32 // atomic; 0 = running, 1 = stopped
+	stopped         uint32 // atomic; 0 = running, 1 = stopped
+	maxPayloadSize  int64
 }
 
 func (c *Transport) SetHandshake(handshake *engineio_v4.HandshakeResponse) {
@@ -158,10 +159,17 @@ func (c *Transport) poll() error {
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(resp.Body)
+	// Limit payload size: read one byte more than the limit to detect oversized payloads
+	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxPayloadSize+1))
 	if err != nil {
 		return err
 	}
+
+	// Check if payload exceeds the maximum size
+	if int64(len(body)) > c.maxPayloadSize {
+		return fmt.Errorf("inbound payload size %d exceeds maximum allowed %d", len(body), c.maxPayloadSize)
+	}
+
 	c.log.Debugf("receiveHttp: %s", string(body))
 
 	c.messages <- body

@@ -49,11 +49,12 @@ func TestRequestHandshake(t *testing.T) {
 
 	messages := make(chan []byte, 1)
 	client := &Transport{
-		log:        mockLogger,
-		httpClient: mockHttpClient,
-		url:        &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
-		ctx:        ctx,
-		messages:   messages,
+		log:            mockLogger,
+		httpClient:     mockHttpClient,
+		url:            &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+		ctx:            ctx,
+		messages:       messages,
+		maxPayloadSize: 4 * 1024 * 1024, // 4MB default
 	}
 
 	mockLogger.EXPECT().Debugf("run polling")
@@ -400,12 +401,13 @@ func TestPoll(t *testing.T) {
 		messagesChan := make(chan []byte, 1)
 
 		client := &Transport{
-			log:        mockLogger,
-			httpClient: mockHTTPClient,
-			url:        &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
-			sid:        "test-sid",
-			ctx:        ctx,
-			messages:   messagesChan,
+			log:            mockLogger,
+			httpClient:     mockHTTPClient,
+			url:            &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:            "test-sid",
+			ctx:            ctx,
+			messages:       messagesChan,
+			maxPayloadSize: 4 * 1024 * 1024, // 4MB default
 		}
 
 		mockLogger.EXPECT().Debugf("run polling")
@@ -605,4 +607,107 @@ type errorReader struct {
 
 func (e *errorReader) Read(p []byte) (n int, err error) {
 	return 0, e.err
+}
+
+func TestPollOversizedPayload(t *testing.T) {
+	t.Run("Payload exceeds max size", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		messagesChan := make(chan []byte, 1)
+		maxPayloadSize := int64(100)
+		oversizedBody := strings.Repeat("x", 101)
+
+		client := &Transport{
+			log:            mockLogger,
+			httpClient:     mockHTTPClient,
+			url:            &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:            "test-sid",
+			ctx:            ctx,
+			messages:       messagesChan,
+			maxPayloadSize: maxPayloadSize,
+		}
+
+		mockLogger.EXPECT().Debugf("run polling")
+
+		mockResp := &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(oversizedBody)),
+		}
+
+		mockHTTPClient.EXPECT().
+			Do(gomock.Any()).
+			DoAndReturn(func(req *http.Request) (*http.Response, error) {
+				return mockResp, nil
+			})
+
+		err := client.poll()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "inbound payload size")
+		assert.Contains(t, err.Error(), "exceeds maximum allowed")
+
+		// Ensure no message was sent
+		assert.Equal(t, 0, len(messagesChan), "Expected no message to be sent for oversized payload")
+	})
+
+	t.Run("Payload within max size", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		messagesChan := make(chan []byte, 1)
+		maxPayloadSize := int64(100)
+		validBody := strings.Repeat("x", 50)
+
+		client := &Transport{
+			log:            mockLogger,
+			httpClient:     mockHTTPClient,
+			url:            &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:            "test-sid",
+			ctx:            ctx,
+			messages:       messagesChan,
+			maxPayloadSize: maxPayloadSize,
+		}
+
+		mockLogger.EXPECT().Debugf("run polling")
+		mockLogger.EXPECT().Debugf("receiveHttp: %s", validBody)
+
+		mockResp := &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(validBody)),
+		}
+
+		mockHTTPClient.EXPECT().
+			Do(gomock.Any()).
+			DoAndReturn(func(req *http.Request) (*http.Response, error) {
+				return mockResp, nil
+			})
+
+		done := make(chan struct{})
+		go func() {
+			err := client.poll()
+			assert.NoError(t, err)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			assert.Equal(t, 1, len(messagesChan), "Expected one message to be sent")
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for poll to complete")
+		}
+	})
 }
