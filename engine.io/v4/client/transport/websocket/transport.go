@@ -159,7 +159,19 @@ func (c *Transport) wsReadLoop() error {
 		case message := <-messageCh:
 			// New message received
 			c.log.Debugf("receiveWs: %s", message)
-			c.messages <- message
+			// Use nested select so we can still respond to stop/cancel
+			// while waiting to deliver the message downstream.
+			select {
+			case c.messages <- message:
+			case <-c.stopPooling:
+				c.log.Debugf("Stop signal received, exiting ws read loop")
+				c.onClose <- nil
+				return nil
+			case <-c.ctx.Done():
+				c.log.Debugf("Context cancelled, exiting ws read loop")
+				c.onClose <- c.ctx.Err()
+				return c.ctx.Err()
+			}
 
 		case err := <-errorCh:
 			// WebSocket error - drain any pending message before returning error
