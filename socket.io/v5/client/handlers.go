@@ -49,6 +49,10 @@ func (c *Client) onMessage(data []byte) {
 		}
 		if msg.Event == nil {
 			c.logger.Errorf("received ACK packet without event data, dropping")
+			// Clean up the callback to prevent memory leak
+			c.mutex.Lock()
+			delete(c.ackCallbacks, *msg.AckId)
+			c.mutex.Unlock()
 			return
 		}
 		c.handleAck(msg.Event, *msg.AckId)
