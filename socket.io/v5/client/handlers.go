@@ -43,6 +43,14 @@ func (c *Client) onMessage(data []byte) {
 	case socketio_v5.PacketEvent:
 		c.handleEvent(ns, msg.Event)
 	case socketio_v5.PacketAck:
+		if msg.AckId == nil {
+			c.logger.Errorf("received ACK packet without ack ID, dropping")
+			return
+		}
+		if msg.Event == nil {
+			c.logger.Errorf("received ACK packet without event data, dropping")
+			return
+		}
 		c.handleAck(msg.Event, *msg.AckId)
 	case socketio_v5.PacketConnectError:
 		c.handleConnectError(ns, msg.Payload)
