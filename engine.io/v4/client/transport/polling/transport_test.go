@@ -383,6 +383,115 @@ func TestStop(t *testing.T) {
 	})
 }
 
+func TestPollingLoop_onClose_full_on_stop(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockLogger.EXPECT().Debugf("stop polling")
+
+	// onClose is buffered with 1 slot, but we fill it to test the default: branch
+	onClose := make(chan error, 1)
+	onClose <- errors.New("pre-filled error")
+
+	// Use a very long-interval ticker so it never fires during test
+	longTicker := time.NewTicker(10 * time.Minute)
+	defer longTicker.Stop()
+
+	stopPoolingCh := make(chan struct{})
+
+	client := &Transport{
+		log:         mockLogger,
+		pinger:      longTicker,
+		stopPooling: stopPoolingCh,
+		ctx:         ctx,
+		onClose:     onClose,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.pollingLoop()
+	}()
+
+	// Send stop signal
+	close(stopPoolingCh)
+
+	// Wait for pollingLoop to return
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("pollingLoop did not return")
+	}
+
+	// Verify pre-filled error is still there (not replaced by onClose send)
+	select {
+	case e := <-onClose:
+		assert.Equal(t, "pre-filled error", e.Error())
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Pre-filled error should still be in channel")
+	}
+}
+
+func TestPollingLoop_onClose_full_on_context_cancel(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockLogger.EXPECT().Debugf("context done, stop http polling")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	onClose := make(chan error, 1)
+	onClose <- errors.New("pre-filled error")
+
+	// Use a very long-interval ticker so it never fires during test
+	longTicker := time.NewTicker(10 * time.Minute)
+	defer longTicker.Stop()
+
+	client := &Transport{
+		log:         mockLogger,
+		pinger:      longTicker,
+		stopPooling: make(chan struct{}),
+		ctx:         ctx,
+		onClose:     onClose,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.pollingLoop()
+	}()
+
+	// Cancel context after a short delay to let pollingLoop start waiting on select
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+
+	// Wait for pollingLoop to return
+	select {
+	case err := <-done:
+		assert.Error(t, err)
+		assert.True(t, errors.Is(err, context.Canceled))
+	case <-time.After(time.Second):
+		t.Fatal("pollingLoop did not return")
+	}
+
+	// Verify pre-filled error is still there (not replaced by onClose send)
+	select {
+	case e := <-onClose:
+		assert.Equal(t, "pre-filled error", e.Error())
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Pre-filled error should still be in channel")
+	}
+}
+
 func TestPoll(t *testing.T) {
 
 	t.Run("Successful poll", func(t *testing.T) {
