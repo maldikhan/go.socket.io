@@ -63,7 +63,8 @@ func (c *Client) handleConnectError(ns *namespace, payload interface{}) {
 	}
 
 	for _, handler := range handlers {
-		go handler([]interface{}{payload})
+		h := handler
+		c.safeGo(func() { h([]interface{}{payload}) })
 	}
 }
 
@@ -80,7 +81,8 @@ func (c *Client) handleDisconnect(ns *namespace, payload interface{}) {
 	}
 
 	for _, handler := range handlers {
-		go handler([]interface{}{payload})
+		h := handler
+		c.safeGo(func() { h([]interface{}{payload}) })
 	}
 }
 
@@ -102,7 +104,8 @@ func (c *Client) handleConnect(ns *namespace, payload interface{}) {
 	}
 
 	for _, handler := range handlers {
-		go handler([]interface{}{payload})
+		h := handler
+		c.safeGo(func() { h([]interface{}{payload}) })
 	}
 }
 
@@ -118,11 +121,13 @@ func (c *Client) handleEvent(ns *namespace, event *socketio_v5.Event) {
 	}
 
 	for _, handler := range anyHandlers {
-		go handler(event.Name, event.Payloads)
+		h := handler
+		c.safeGo(func() { h(event.Name, event.Payloads) })
 	}
 
 	for _, handler := range handlers {
-		go handler(event.Payloads)
+		h := handler
+		c.safeGo(func() { h(event.Payloads) })
 	}
 }
 
@@ -137,5 +142,5 @@ func (c *Client) handleAck(event *socketio_v5.Event, ackId int) {
 		return
 	}
 
-	go callback(event.Payloads)
+	c.safeGo(func() { callback(event.Payloads) })
 }

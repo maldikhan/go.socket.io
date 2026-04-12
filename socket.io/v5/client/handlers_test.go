@@ -408,3 +408,88 @@ func TestClientHandleAck(t *testing.T) {
 		assert.Len(t, client.ackCallbacks, 0)
 	})
 }
+
+func TestSafeGoPanicRecovery(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+
+	client := &Client{
+		logger: mockLogger,
+	}
+
+	t.Run("Handler that panics is recovered", func(t *testing.T) {
+		panicMsg := "test panic"
+		handlerExecuted := make(chan bool)
+
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).Do(func(format string, args ...interface{}) {
+			assert.Contains(t, format, "panic in event handler")
+			assert.Contains(t, args[0], panicMsg)
+			handlerExecuted <- true
+		})
+
+		client.safeGo(func() {
+			panic(panicMsg)
+		})
+
+		select {
+		case <-handlerExecuted:
+		case <-time.After(100 * time.Millisecond):
+			t.Error("panic recovery should have logged error")
+		}
+	})
+
+	t.Run("Handler that completes normally works fine", func(t *testing.T) {
+		handlerExecuted := make(chan bool)
+
+		client.safeGo(func() {
+			handlerExecuted <- true
+		})
+
+		select {
+		case <-handlerExecuted:
+		case <-time.After(100 * time.Millisecond):
+			t.Error("handler should have executed")
+		}
+	})
+
+	t.Run("handleEvent with panicking handler recovers gracefully", func(t *testing.T) {
+		panicMsg := "event handler panic"
+		handlerExecuted := make(chan bool, 1)
+		normalHandlerExecuted := make(chan bool, 1)
+
+		mockLogger.EXPECT().Infof(gomock.Any(), gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).Do(func(format string, args ...interface{}) {
+			assert.Contains(t, format, "panic in event handler")
+			handlerExecuted <- true
+		})
+
+		ns := &namespace{
+			handlers: make(map[string][]func([]interface{})),
+		}
+
+		ns.handlers["test_event"] = []func([]interface{}){
+			func(args []interface{}) {
+				panic(panicMsg)
+			},
+			func(args []interface{}) {
+				normalHandlerExecuted <- true
+			},
+		}
+
+		client.handleEvent(ns, &socketio_v5.Event{Name: "test_event"})
+
+		select {
+		case <-handlerExecuted:
+		case <-time.After(100 * time.Millisecond):
+			t.Error("panicking handler should have been recovered")
+		}
+
+		select {
+		case <-normalHandlerExecuted:
+		case <-time.After(100 * time.Millisecond):
+			t.Error("second handler should have executed despite first panicking")
+		}
+	})
+}

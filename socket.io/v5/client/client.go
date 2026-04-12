@@ -80,6 +80,17 @@ func (c *Client) namespace(name string) *namespace {
 	return ns
 }
 
+func (c *Client) safeGo(fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				c.logger.Errorf("panic in event handler: %v", r)
+			}
+		}()
+		fn()
+	}()
+}
+
 func (c *Client) Close() error {
 	return c.engineio.Close()
 }
