@@ -39,13 +39,24 @@ type namespace struct {
 }
 
 func (c *Client) SetHandshakeData(data map[string]interface{}) {
-	c.handshakeData = data
+	// Make a copy to prevent external mutation after set
+	dataCopy := make(map[string]interface{})
+	for k, v := range data {
+		dataCopy[k] = v
+	}
+	c.mutex.Lock()
+	c.handshakeData = dataCopy
+	c.mutex.Unlock()
 }
 
 func (c *Client) connectSocketIO(_ []byte) {
+	c.mutex.RLock()
+	handshakeData := c.handshakeData
+	c.mutex.RUnlock()
+
 	err := c.sendPacket(&socketio_v5.Message{
 		Type:    socketio_v5.PacketConnect,
-		Payload: c.handshakeData,
+		Payload: handshakeData,
 	})
 
 	if err != nil {
@@ -54,7 +65,9 @@ func (c *Client) connectSocketIO(_ []byte) {
 }
 
 func (c *Client) Connect(ctx context.Context, callbacks ...func(arg interface{})) error {
+	c.mutex.Lock()
 	c.ctx = ctx
+	c.mutex.Unlock()
 	for _, callback := range callbacks {
 		c.On("connect", callback)
 	}
