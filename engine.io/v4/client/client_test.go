@@ -869,7 +869,8 @@ func TestClient_Send_after_close(t *testing.T) {
 }
 
 func TestClient_handleHandshake_ticker_stopped(t *testing.T) {
-	// Test that the old ticker is stopped when creating a new one during re-handshake
+	// Test that the ticker is reset (not replaced) during re-handshake to preserve
+	// the reference shared with the polling transport via WithDefaultPinger
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -905,7 +906,8 @@ func TestClient_handleHandshake_ticker_stopped(t *testing.T) {
 	firstTicker := client.pingInterval
 	assert.NotNil(t, firstTicker)
 
-	// Second handshake - should stop the old ticker and create a new one
+	// Second handshake - should reset the existing ticker (same object,
+	// because it's shared with the polling transport via WithDefaultPinger)
 	client.hadHandshake = sync.Once{}
 	client.waitHandshake = make(chan struct{})
 	err = client.handleHandshake(data)
@@ -913,7 +915,7 @@ func TestClient_handleHandshake_ticker_stopped(t *testing.T) {
 
 	secondTicker := client.pingInterval
 	assert.NotNil(t, secondTicker)
-	assert.NotEqual(t, firstTicker, secondTicker, "should be a different ticker object")
+	assert.Equal(t, firstTicker, secondTicker, "should reuse the same ticker object to preserve polling transport reference")
 
 	// Cleanup
 	if client.pingInterval != nil {

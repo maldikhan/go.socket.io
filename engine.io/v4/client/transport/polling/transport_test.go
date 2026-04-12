@@ -383,6 +383,89 @@ func TestStop(t *testing.T) {
 	})
 }
 
+func TestPollingLoop_onClose_full_on_stop(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockLogger.EXPECT().Debugf("stop polling")
+
+	// onClose is buffered with 1 slot, but we fill it to test the default: branch
+	onClose := make(chan error, 1)
+	onClose <- errors.New("pre-filled error")
+
+	client := &Transport{
+		log:         mockLogger,
+		pinger:      time.NewTicker(time.Minute),
+		stopPooling: make(chan struct{}),
+		ctx:         ctx,
+		onClose:     onClose,
+	}
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		close(client.stopPooling)
+	}()
+
+	err := client.pollingLoop()
+	assert.NoError(t, err)
+
+	// Verify pre-filled error is still there
+	select {
+	case e := <-onClose:
+		assert.Equal(t, "pre-filled error", e.Error())
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Pre-filled error should still be in channel")
+	}
+}
+
+func TestPollingLoop_onClose_full_on_context_cancel(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockLogger.EXPECT().Debugf("context done, stop http polling")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx, timeout := context.WithTimeout(ctx, 5*time.Second)
+	defer timeout()
+
+	onClose := make(chan error, 1)
+	onClose <- errors.New("pre-filled error")
+
+	client := &Transport{
+		log:         mockLogger,
+		pinger:      time.NewTicker(time.Minute),
+		stopPooling: make(chan struct{}),
+		ctx:         ctx,
+		onClose:     onClose,
+	}
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	err := client.pollingLoop()
+	assert.Error(t, err)
+	assert.True(t, errors.Is(err, context.Canceled))
+
+	// Verify pre-filled error is still there
+	select {
+	case e := <-onClose:
+		assert.Equal(t, "pre-filled error", e.Error())
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Pre-filled error should still be in channel")
+	}
+}
+
 func TestPoll(t *testing.T) {
 
 	t.Run("Successful poll", func(t *testing.T) {

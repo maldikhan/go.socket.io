@@ -496,3 +496,162 @@ func TestTransport_SendMessage_Error(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, "send error", err.Error())
 }
+
+func TestTransport_wsReadLoop_onClose_already_full(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+	mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	messages := make(chan []byte, 1)
+	// onClose is buffered with 1 slot, but we fill it to test the default: branch
+	onClose := make(chan error, 1)
+	onClose <- errors.New("pre-filled error")
+
+	transport := &Transport{
+		log:         mockLogger,
+		ws:          mockWS,
+		ctx:         ctx,
+		messages:    messages,
+		onClose:     onClose,
+		stopPooling: make(chan struct{}, 1),
+	}
+
+	mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+
+	// Test stopPooling default: branch (line 142-143)
+	mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		*message = []byte("test")
+		return nil
+	}).Times(1)
+	mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		<-transport.ctx.Done()
+		return nil
+	}).Times(1)
+
+	go func() {
+		err := transport.wsReadLoop()
+		assert.NoError(t, err)
+	}()
+
+	// Check message is received
+	select {
+	case msg := <-messages:
+		assert.Equal(t, []byte("test"), msg)
+	case <-time.After(time.Second):
+		t.Fatal("Timeout waiting for message")
+	}
+
+	// Trigger stopPooling with onClose buffer already full
+	transport.stopPooling <- struct{}{}
+	select {
+	case err := <-onClose:
+		assert.Equal(t, "pre-filled error", err.Error())
+	case <-time.After(time.Second):
+		t.Fatal("Timeout waiting for initial onClose")
+	}
+
+	// wsReadLoop should exit without deadlock
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestTransport_wsReadLoop_onClose_full_on_error(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+	mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	messages := make(chan []byte, 1)
+	onClose := make(chan error, 1)
+	onClose <- errors.New("pre-filled error")
+
+	transport := &Transport{
+		log:         mockLogger,
+		ws:          mockWS,
+		ctx:         ctx,
+		messages:    messages,
+		onClose:     onClose,
+		stopPooling: make(chan struct{}, 1),
+	}
+
+	mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
+
+	// Test error default: branch (line 168-169)
+	wsErr := errors.New("websocket error")
+	mockWS.EXPECT().Receive(gomock.Any()).Return(wsErr)
+
+	go func() {
+		err := transport.wsReadLoop()
+		assert.Equal(t, wsErr, err)
+	}()
+
+	select {
+	case err := <-onClose:
+		assert.Equal(t, "pre-filled error", err.Error())
+	case <-time.After(time.Second):
+		t.Fatal("Timeout waiting for initial onClose")
+	}
+
+	// Give time for wsReadLoop to try sending error to full onClose channel
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestTransport_wsReadLoop_onClose_full_on_context_cancel(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+	mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	messages := make(chan []byte, 1)
+	onClose := make(chan error, 1)
+	onClose <- errors.New("pre-filled error")
+
+	transport := &Transport{
+		log:         mockLogger,
+		ws:          mockWS,
+		ctx:         ctx,
+		messages:    messages,
+		onClose:     onClose,
+		stopPooling: make(chan struct{}, 1),
+	}
+
+	mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+
+	// Test context canceled default: branch (line 150-151)
+	mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		<-transport.ctx.Done()
+		return nil
+	})
+
+	go func() {
+		err := transport.wsReadLoop()
+		assert.Equal(t, context.Canceled, err)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+}
