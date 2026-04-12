@@ -494,7 +494,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 
 		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
 			<-ctx.Done()
-			return nil
+			return context.Canceled
 		}).AnyTimes()
 
 		go func() {

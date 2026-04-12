@@ -162,7 +162,12 @@ func (c *Transport) wsReadLoop() error {
 			c.messages <- message
 
 		case err := <-errorCh:
-			// WebSocket error
+			// WebSocket error - drain any pending message before returning error
+			select {
+			case msg := <-messageCh:
+				c.messages <- msg
+			default:
+			}
 			c.log.Errorf("receiveWsError: %v", err)
 			c.onClose <- err
 			return err
