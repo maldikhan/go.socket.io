@@ -33,7 +33,22 @@ func (c *Client) onMessage(data []byte) {
 		return
 	}
 
+	// Safely read namespace under RLock to prevent race condition
+	c.mutex.RLock()
 	ns := c.namespaces[msg.NS]
+	c.mutex.RUnlock()
+
+	// Handle nil namespace case
+	if ns == nil {
+		// For PacketConnect, auto-create the namespace
+		if msg.Type == socketio_v5.PacketConnect {
+			ns = c.namespace(msg.NS)
+		} else {
+			// For other packet types, log warning and return
+			c.logger.Warnf("Received %v for unknown namespace: %s", msg.Type, msg.NS)
+			return
+		}
+	}
 
 	switch msg.Type {
 	case socketio_v5.PacketDisconnect:
