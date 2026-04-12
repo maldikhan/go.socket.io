@@ -867,3 +867,102 @@ func TestClient_Send_after_close(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "client is closed")
 }
+
+// TestClient_On_concurrent tests that concurrent On() calls and handler reads
+// do not cause data races. This test should be run with -race to detect issues.
+func TestClient_On_concurrent(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockParser := mocks.NewMockParser(ctrl)
+
+	testURL, _ := url.Parse("http://localhost")
+	client := &Client{
+		url:    testURL,
+		log:    mockLogger,
+		parser: mockParser,
+	}
+
+	// Track which handlers were called
+	var mu sync.Mutex
+	handlersSet := make(map[string]bool)
+
+	// Simulate concurrent On() calls from the user goroutine
+	numWriters := 10
+	numReaders := 10
+	numIterations := 100
+
+	done := make(chan struct{})
+
+	// Writer goroutines: continuously call On() to register handlers
+	for w := 0; w < numWriters; w++ {
+		go func(writerID int) {
+			for i := 0; i < numIterations; i++ {
+				client.On("message", func(b []byte) {
+					mu.Lock()
+					handlersSet["message"] = true
+					mu.Unlock()
+				})
+				client.On("connect", func(b []byte) {
+					mu.Lock()
+					handlersSet["connect"] = true
+					mu.Unlock()
+				})
+				client.On("close", func(b []byte) {
+					mu.Lock()
+					handlersSet["close"] = true
+					mu.Unlock()
+				})
+			}
+			done <- struct{}{}
+		}(w)
+	}
+
+	// Reader goroutines: continuously read and call handlers
+	// (simulating what happens in handlePacket and handleHandshake)
+	for r := 0; r < numReaders; r++ {
+		go func(readerID int) {
+			for i := 0; i < numIterations; i++ {
+				// Simulate reading messageHandler
+				client.handlerMu.RLock()
+				handler := client.messageHandler
+				client.handlerMu.RUnlock()
+				if handler != nil {
+					handler([]byte("test"))
+				}
+
+				// Simulate reading closeHandler
+				client.handlerMu.RLock()
+				closeH := client.closeHandler
+				client.handlerMu.RUnlock()
+				if closeH != nil {
+					closeH()
+				}
+
+				// Simulate reading afterConnect
+				client.handlerMu.RLock()
+				connectH := client.afterConnect
+				client.handlerMu.RUnlock()
+				if connectH != nil {
+					connectH()
+				}
+			}
+			done <- struct{}{}
+		}(r)
+	}
+
+	// Wait for all goroutines to finish
+	total := numWriters + numReaders
+	for i := 0; i < total; i++ {
+		<-done
+	}
+
+	// Verify that some handlers were indeed set and called
+	mu.Lock()
+	assert.True(t, handlersSet["message"] || handlersSet["connect"] || handlersSet["close"],
+		"At least some handlers should have been called")
+	mu.Unlock()
+}
