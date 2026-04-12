@@ -179,7 +179,9 @@ func (c *Transport) SendMessage(msg []byte) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	c.log.Debugf("receiveHttp: %s", resp.Status)
 	return nil
