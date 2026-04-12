@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"sync"
 
 	"golang.org/x/net/websocket"
 )
 
 type WebSocketConnection struct {
+	mu   sync.Mutex
 	conn *websocket.Conn
 }
 
@@ -28,6 +30,8 @@ func (ws *WebSocketConnection) Send(v []byte) error {
 	if ws.conn == nil {
 		return ErrNotConnected
 	}
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
 	return websocket.Message.Send(ws.conn, string(v))
 }
 
@@ -42,5 +46,7 @@ func (ws *WebSocketConnection) Close() error {
 	if ws.conn == nil {
 		return nil
 	}
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
 	return ws.conn.Close()
 }
