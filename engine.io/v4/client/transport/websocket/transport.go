@@ -119,12 +119,17 @@ func (c *Transport) connectWebSocket() error {
 func (c *Transport) wsReadLoop() error {
 	c.log.Debugf("run ws read loop")
 
-	// Make challel for messages
-	messageCh := make(chan []byte)
-	errorCh := make(chan error)
-	for {
-		// Run  ws read loop in goroutine
-		go func() {
+	// Make buffered channels for messages and errors.
+	// Buffering(1) allows the read goroutine to send its result before
+	// wsReadLoop may have exited, preventing goroutine leaks.
+	messageCh := make(chan []byte, 1)
+	errorCh := make(chan error, 1)
+
+	// Spawn exactly ONE read goroutine before the loop.
+	// This goroutine runs in an infinite loop, continuously reading from
+	// the WebSocket and writing to the buffered channels.
+	go func() {
+		for {
 			var message []byte
 			err := c.ws.Receive(&message)
 			if err != nil {
@@ -132,11 +137,16 @@ func (c *Transport) wsReadLoop() error {
 				return
 			}
 			messageCh <- message
-		}()
+		}
+	}()
 
+	// Main select loop handles incoming messages and control signals.
+	// The read goroutine above will be unblocked when ws.Close() is called
+	// (in connectWebSocket after wsReadLoop returns).
+	for {
 		select {
 		case <-c.stopPooling:
-			c.log.Debugf("Context cancelled, exiting ws read loop")
+			c.log.Debugf("Stop signal received, exiting ws read loop")
 			c.onClose <- nil
 			return nil
 
