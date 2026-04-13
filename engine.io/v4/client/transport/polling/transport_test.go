@@ -710,4 +710,59 @@ func TestPollOversizedPayload(t *testing.T) {
 			t.Fatal("Timeout waiting for poll to complete")
 		}
 	})
+
+	t.Run("Payload limit overflow guard", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		messagesChan := make(chan []byte, 1)
+		// Set maxPayloadSize to a value that would overflow when incremented
+		maxPayloadSize := int64(9223372036854775807) // math.MaxInt64
+
+		client := &Transport{
+			log:            mockLogger,
+			httpClient:     mockHTTPClient,
+			url:            &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:            "test-sid",
+			ctx:            ctx,
+			messages:       messagesChan,
+			maxPayloadSize: maxPayloadSize,
+		}
+
+		mockLogger.EXPECT().Debugf("run polling")
+		mockLogger.EXPECT().Debugf("receiveHttp: %s", "test")
+
+		mockResp := &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader("test")),
+		}
+
+		mockHTTPClient.EXPECT().
+			Do(gomock.Any()).
+			DoAndReturn(func(req *http.Request) (*http.Response, error) {
+				return mockResp, nil
+			})
+
+		done := make(chan struct{})
+		go func() {
+			err := client.poll()
+			// Should succeed because "test" (4 bytes) is within MaxInt64
+			assert.NoError(t, err)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			assert.Equal(t, 1, len(messagesChan), "Expected one message to be sent")
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for poll to complete")
+		}
+	})
 }
