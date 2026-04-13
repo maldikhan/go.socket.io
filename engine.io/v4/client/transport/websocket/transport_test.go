@@ -621,27 +621,106 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
 		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
+		delivered := false
 		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
-			// Wait for context to be canceled before returning
+			if !delivered {
+				delivered = true
+				*message = []byte("blocked message")
+				return nil
+			}
+			// Subsequent calls block until context is done
 			<-ctx.Done()
 			return context.Canceled
 		}).AnyTimes()
+
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
 
 		go func() {
 			err := transport.wsReadLoop()
 			assert.Equal(t, context.Canceled, err)
 		}()
 
-		// Wait a bit to ensure message is ready to be sent
+		// Wait for wsReadLoop to block on c.messages <- message
+		// (messages channel is unbuffered with no reader)
 		time.Sleep(50 * time.Millisecond)
 
-		// Cancel context - should exit message delivery with ctx.Done()
+		// Cancel context - should exit inner message delivery select via ctx.Done()
 		cancel()
 
 		// Should see onClose with context error
 		select {
 		case err := <-onClose:
 			assert.Equal(t, context.Canceled, err)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for onClose")
+		}
+	})
+
+	// Test message delivery with stop signal (stopPooling while backpressured)
+	t.Run("message delivery with stop signal", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+		mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Use unbuffered channel so send blocks
+		messages := make(chan []byte)
+		onClose := make(chan error, 1)
+		stopPooling := make(chan struct{}, 1)
+		transport := &Transport{
+			log:         mockLogger,
+			ws:          mockWS,
+			ctx:         ctx,
+			messages:    messages,
+			onClose:     onClose,
+			stopPooling: stopPooling,
+		}
+
+		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+
+		delivered := false
+		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+			if !delivered {
+				delivered = true
+				*message = []byte("blocked message")
+				return nil
+			}
+			<-ctx.Done()
+			return context.Canceled
+		}).AnyTimes()
+
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
+
+		done := make(chan error, 1)
+		go func() {
+			done <- transport.wsReadLoop()
+		}()
+
+		// Wait for wsReadLoop to block on c.messages <- message
+		time.Sleep(50 * time.Millisecond)
+
+		// Send stop signal - should exit inner message delivery select
+		stopPooling <- struct{}{}
+
+		// Should exit with nil error
+		select {
+		case err := <-done:
+			assert.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for wsReadLoop to exit")
+		}
+
+		// Should see nil on onClose
+		select {
+		case err := <-onClose:
+			assert.NoError(t, err)
 		case <-time.After(time.Second):
 			t.Fatal("Timeout waiting for onClose")
 		}
