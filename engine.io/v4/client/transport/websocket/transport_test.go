@@ -715,6 +715,60 @@ func TestTransport_wsReadLoop_message_context_cancel(t *testing.T) {
 	}
 }
 
+func TestTransport_wsReadLoop_error_default_onClose_branch(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+	mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	messages := make(chan []byte, 1)
+	// Pre-fill onClose so the error-path default branch (line 169) is taken
+	onClose := make(chan error, 1)
+	onClose <- errors.New("pre-filled")
+
+	transport := &Transport{
+		log:         mockLogger,
+		ws:          mockWS,
+		ctx:         ctx,
+		messages:    messages,
+		onClose:     onClose,
+		stopPooling: make(chan struct{}, 1),
+	}
+
+	mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
+
+	wsErr := errors.New("ws read error")
+	mockWS.EXPECT().Receive(gomock.Any()).Return(wsErr)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.wsReadLoop()
+	}()
+
+	select {
+	case err := <-done:
+		assert.Equal(t, wsErr, err)
+	case <-time.After(time.Second):
+		t.Fatal("Timeout waiting for wsReadLoop to exit")
+	}
+
+	// Verify pre-filled error is still in onClose (ws error was dropped via default)
+	select {
+	case err := <-onClose:
+		assert.Equal(t, "pre-filled", err.Error())
+	default:
+		t.Fatal("Expected pre-filled error to still be in onClose")
+	}
+}
+
 func TestTransport_Stop_non_blocking_default_branch(t *testing.T) {
 	t.Parallel()
 
