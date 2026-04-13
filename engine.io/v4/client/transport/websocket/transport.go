@@ -119,17 +119,12 @@ func (c *Transport) connectWebSocket() error {
 func (c *Transport) wsReadLoop() error {
 	c.log.Debugf("run ws read loop")
 
-	// Make buffered channels for messages and errors.
-	// Buffering(1) allows the read goroutine to send its result before
-	// wsReadLoop may have exited, preventing goroutine leaks.
-	messageCh := make(chan []byte, 1)
-	errorCh := make(chan error, 1)
-
-	// Spawn exactly ONE read goroutine before the loop.
-	// This goroutine runs in an infinite loop, continuously reading from
-	// the WebSocket and writing to the buffered channels.
-	go func() {
-		for {
+	// Make channels for messages and errors
+	messageCh := make(chan []byte)
+	errorCh := make(chan error)
+	for {
+		// Run ws read in goroutine
+		go func() {
 			var message []byte
 			err := c.ws.Receive(&message)
 			if err != nil {
@@ -137,59 +132,42 @@ func (c *Transport) wsReadLoop() error {
 				return
 			}
 			messageCh <- message
-		}
-	}()
+		}()
 
-	// Main select loop handles incoming messages and control signals.
-	// The read goroutine above will be unblocked when ws.Close() is called
-	// (in connectWebSocket after wsReadLoop returns).
-	for {
 		select {
 		case <-c.stopPooling:
-			c.log.Debugf("Stop signal received, exiting ws read loop")
-			c.onClose <- nil
+			c.log.Debugf("Context cancelled, exiting ws read loop")
+			select {
+			case c.onClose <- nil:
+			default:
+			}
 			return nil
 
 		case <-c.ctx.Done():
 			// Context cancelled
 			c.log.Debugf("Context cancelled, exiting ws read loop")
-			c.onClose <- c.ctx.Err()
+			select {
+			case c.onClose <- c.ctx.Err():
+			default:
+			}
 			return c.ctx.Err()
 
 		case message := <-messageCh:
 			// New message received
 			c.log.Debugf("receiveWs: %s", message)
-			// Use nested select so we can still respond to stop/cancel
-			// while waiting to deliver the message downstream.
 			select {
 			case c.messages <- message:
-			case <-c.stopPooling:
-				c.log.Debugf("Stop signal received, exiting ws read loop")
-				c.onClose <- nil
-				return nil
 			case <-c.ctx.Done():
-				c.log.Debugf("Context cancelled, exiting ws read loop")
-				c.onClose <- c.ctx.Err()
 				return c.ctx.Err()
 			}
 
 		case err := <-errorCh:
-			// WebSocket error - drain any pending message before returning error.
-			// Use nested select to avoid blocking if messages channel is full.
+			// WebSocket error
+			c.log.Errorf("receiveWsError: %v", err)
 			select {
-			case msg := <-messageCh:
-				select {
-				case c.messages <- msg:
-				case <-c.stopPooling:
-				case <-c.ctx.Done():
-				default:
-					// Drop the drained message if we can't deliver it;
-					// we're on the error path and will return the WS error.
-				}
+			case c.onClose <- err:
 			default:
 			}
-			c.log.Errorf("receiveWsError: %v", err)
-			c.onClose <- err
 			return err
 		}
 	}
