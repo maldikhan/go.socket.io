@@ -515,6 +515,483 @@ func TestTransport_wsReadLoop(t *testing.T) {
 			t.Fatal("Timeout waiting for onClose")
 		}
 	})
+
+	// Test nested select in message delivery - successful message send
+	t.Run("nested select message delivery success", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+		mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Use buffered channel to allow message delivery
+		messages := make(chan []byte, 10)
+		onClose := make(chan error, 1)
+		transport := &Transport{
+			log:         mockLogger,
+			ws:          mockWS,
+			ctx:         ctx,
+			messages:    messages,
+			onClose:     onClose,
+			stopPooling: make(chan struct{}, 1),
+		}
+
+		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+
+		callCount := 0
+		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+			callCount++
+			if callCount == 1 {
+				*message = []byte("test message 1")
+				return nil
+			}
+			if callCount == 2 {
+				*message = []byte("test message 2")
+				return nil
+			}
+			// Block until context is done
+			<-ctx.Done()
+			return context.Canceled
+		}).AnyTimes()
+
+		go func() {
+			err := transport.wsReadLoop()
+			// Should be context canceled from our defer cancel()
+			if err != nil {
+				assert.Equal(t, context.Canceled, err)
+			}
+		}()
+
+		// Receive multiple messages
+		select {
+		case msg := <-messages:
+			assert.Equal(t, []byte("test message 1"), msg)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for first message")
+		}
+
+		select {
+		case msg := <-messages:
+			assert.Equal(t, []byte("test message 2"), msg)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for second message")
+		}
+
+		// Stop and verify clean exit
+		transport.stopPooling <- struct{}{}
+		select {
+		case <-onClose:
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for onClose")
+		}
+	})
+
+	// Test nested select in message delivery - stop during delivery
+	t.Run("nested select message delivery with stop", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+		mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Use unbuffered channel to block on send
+		messages := make(chan []byte)
+		onClose := make(chan error, 1)
+		transport := &Transport{
+			log:         mockLogger,
+			ws:          mockWS,
+			ctx:         ctx,
+			messages:    messages,
+			onClose:     onClose,
+			stopPooling: make(chan struct{}, 1),
+		}
+
+		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+
+		callCount := 0
+		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+			callCount++
+			if callCount <= 2 {
+				*message = []byte(fmt.Sprintf("test message %d", callCount))
+				return nil
+			}
+			// Block forever to keep goroutine alive
+			<-ctx.Done()
+			return context.Canceled
+		}).AnyTimes()
+
+		go func() {
+			err := transport.wsReadLoop()
+			assert.NoError(t, err)
+		}()
+
+		// Wait for messages to start queueing
+		time.Sleep(100 * time.Millisecond)
+
+		// Send stop signal while message is being delivered
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			transport.stopPooling <- struct{}{}
+		}()
+
+		// Try to receive - should eventually see onClose due to stop
+		select {
+		case <-onClose:
+			// Successfully stopped
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for onClose")
+		}
+	})
+
+	// Test nested select in message delivery - context cancel during delivery
+	t.Run("nested select message delivery with context cancel", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+		mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Use unbuffered channel to block on send
+		messages := make(chan []byte)
+		onClose := make(chan error, 1)
+		transport := &Transport{
+			log:         mockLogger,
+			ws:          mockWS,
+			ctx:         ctx,
+			messages:    messages,
+			onClose:     onClose,
+			stopPooling: make(chan struct{}, 1),
+		}
+
+		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+
+		callCount := 0
+		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+			callCount++
+			if callCount <= 2 {
+				*message = []byte(fmt.Sprintf("test message %d", callCount))
+				return nil
+			}
+			// Block forever to keep goroutine alive
+			<-ctx.Done()
+			return context.Canceled
+		}).AnyTimes()
+
+		go func() {
+			err := transport.wsReadLoop()
+			assert.Equal(t, context.Canceled, err)
+		}()
+
+		// Wait for messages to start queueing
+		time.Sleep(100 * time.Millisecond)
+
+		// Cancel context while message is being delivered
+		cancel()
+
+		// Should see onClose with context error
+		select {
+		case err := <-onClose:
+			assert.Equal(t, context.Canceled, err)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for onClose")
+		}
+	})
+
+	// Test error path with pending message drain - message delivery succeeds
+	t.Run("error path with pending message drain success", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+		mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		messages := make(chan []byte, 10)
+		onClose := make(chan error, 1)
+		transport := &Transport{
+			log:         mockLogger,
+			ws:          mockWS,
+			ctx:         ctx,
+			messages:    messages,
+			onClose:     onClose,
+			stopPooling: make(chan struct{}, 1),
+		}
+
+		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
+
+		readCalls := 0
+		ErrExpected := errors.New("ws read error")
+		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+			readCalls++
+			if readCalls == 1 {
+				// First call returns a message
+				*message = []byte("pending message")
+				return nil
+			}
+			// Second call returns error immediately
+			return ErrExpected
+		}).AnyTimes()
+
+		go func() {
+			err := transport.wsReadLoop()
+			assert.Equal(t, ErrExpected, err)
+		}()
+
+		// Wait for pending message to be received
+		select {
+		case msg := <-messages:
+			assert.Equal(t, []byte("pending message"), msg)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for pending message")
+		}
+
+		// Now trigger error
+		select {
+		case err := <-onClose:
+			assert.Equal(t, ErrExpected, err)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for onClose")
+		}
+	})
+
+	// Test error path with pending message drain - multiple read calls to hit error path
+	t.Run("error path with pending message drain stop", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+		mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		messages := make(chan []byte, 10)
+		onClose := make(chan error, 1)
+		transport := &Transport{
+			log:         mockLogger,
+			ws:          mockWS,
+			ctx:         ctx,
+			messages:    messages,
+			onClose:     onClose,
+			stopPooling: make(chan struct{}, 1),
+		}
+
+		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
+
+		readCalls := 0
+		ErrExpected := errors.New("ws read error")
+		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+			readCalls++
+			if readCalls == 1 {
+				// First call returns a message that will be delivered
+				*message = []byte("pending message")
+				return nil
+			}
+			if readCalls == 2 {
+				// Second call also returns a message to put in the channel
+				*message = []byte("another message")
+				return nil
+			}
+			// Third call returns error
+			return ErrExpected
+		}).AnyTimes()
+
+		errorReceived := make(chan error, 1)
+		go func() {
+			err := transport.wsReadLoop()
+			errorReceived <- err
+		}()
+
+		// Receive the messages
+		select {
+		case msg := <-messages:
+			assert.Equal(t, []byte("pending message"), msg)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for first message")
+		}
+
+		select {
+		case msg := <-messages:
+			assert.Equal(t, []byte("another message"), msg)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for second message")
+		}
+
+		// Should eventually get error
+		select {
+		case err := <-onClose:
+			assert.Equal(t, ErrExpected, err)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for onClose")
+		}
+
+		// Verify wsReadLoop returned the error
+		select {
+		case err := <-errorReceived:
+			assert.Equal(t, ErrExpected, err)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for wsReadLoop error")
+		}
+	})
+
+	// Test error path with pending message drain - context cancel during drain
+	t.Run("error path with pending message drain context cancel", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+		mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		messages := make(chan []byte, 10)
+		onClose := make(chan error, 1)
+		transport := &Transport{
+			log:         mockLogger,
+			ws:          mockWS,
+			ctx:         ctx,
+			messages:    messages,
+			onClose:     onClose,
+			stopPooling: make(chan struct{}, 1),
+		}
+
+		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
+
+		readCalls := 0
+		ErrExpected := errors.New("ws read error")
+		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+			readCalls++
+			if readCalls == 1 {
+				// First call returns a message
+				*message = []byte("pending message")
+				return nil
+			}
+			if readCalls == 2 {
+				// Second call returns another message
+				*message = []byte("another message")
+				return nil
+			}
+			// Third call returns error
+			return ErrExpected
+		}).AnyTimes()
+
+		errorReceived := make(chan error, 1)
+		go func() {
+			err := transport.wsReadLoop()
+			errorReceived <- err
+		}()
+
+		// Receive messages
+		select {
+		case msg := <-messages:
+			assert.Equal(t, []byte("pending message"), msg)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for first message")
+		}
+
+		select {
+		case msg := <-messages:
+			assert.Equal(t, []byte("another message"), msg)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for second message")
+		}
+
+		// Should eventually get error
+		select {
+		case err := <-onClose:
+			assert.Equal(t, ErrExpected, err)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for onClose")
+		}
+
+		// Verify wsReadLoop returned the error
+		select {
+		case err := <-errorReceived:
+			assert.Equal(t, ErrExpected, err)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for wsReadLoop error")
+		}
+	})
+
+	// Test error path with no pending message (default case in nested select)
+	t.Run("error path with no pending message", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+		mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		messages := make(chan []byte, 1)
+		onClose := make(chan error, 1)
+		transport := &Transport{
+			log:         mockLogger,
+			ws:          mockWS,
+			ctx:         ctx,
+			messages:    messages,
+			onClose:     onClose,
+			stopPooling: make(chan struct{}, 1),
+		}
+
+		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
+
+		ErrExpected := errors.New("ws read error")
+		mockWS.EXPECT().Receive(gomock.Any()).Return(ErrExpected).AnyTimes()
+
+		go func() {
+			err := transport.wsReadLoop()
+			assert.Equal(t, ErrExpected, err)
+		}()
+
+		// Should immediately get error since no message is pending
+		select {
+		case err := <-onClose:
+			assert.Equal(t, ErrExpected, err)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for onClose")
+		}
+	})
+
+
 }
 
 func TestTransport_SendMessage(t *testing.T) {
