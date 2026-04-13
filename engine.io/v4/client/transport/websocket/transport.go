@@ -182,6 +182,9 @@ func (c *Transport) wsReadLoop() error {
 				case c.messages <- msg:
 				case <-c.stopPooling:
 				case <-c.ctx.Done():
+				default:
+					// Drop the drained message if we can't deliver it;
+					// we're on the error path and will return the WS error.
 				}
 			default:
 			}
