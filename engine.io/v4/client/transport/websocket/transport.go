@@ -174,10 +174,15 @@ func (c *Transport) wsReadLoop() error {
 			}
 
 		case err := <-errorCh:
-			// WebSocket error - drain any pending message before returning error
+			// WebSocket error - drain any pending message before returning error.
+			// Use nested select to avoid blocking if messages channel is full.
 			select {
 			case msg := <-messageCh:
-				c.messages <- msg
+				select {
+				case c.messages <- msg:
+				case <-c.stopPooling:
+				case <-c.ctx.Done():
+				}
 			default:
 			}
 			c.log.Errorf("receiveWsError: %v", err)
