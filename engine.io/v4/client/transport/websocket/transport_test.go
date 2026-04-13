@@ -991,6 +991,81 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		}
 	})
 
+	// Test error path with drain default case - stop during drain
+	// This test ensures that when we drain a pending message in the error path,
+	// if stopPooling is signaled during the drain, we handle it correctly.
+	// The inner select's default case may also be hit if the messages channel
+	// is full and both stopPooling and ctx.Done() are not signaled.
+	t.Run("error path with drain stop signal", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+		mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		messages := make(chan []byte, 10)
+		onClose := make(chan error, 1)
+		transport := &Transport{
+			log:         mockLogger,
+			ws:          mockWS,
+			ctx:         ctx,
+			messages:    messages,
+			onClose:     onClose,
+			stopPooling: make(chan struct{}, 1),
+		}
+
+		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
+
+		readCalls := 0
+		ErrExpected := errors.New("ws read error")
+		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+			readCalls++
+			if readCalls == 1 {
+				// First call returns a message to move past initial send
+				*message = []byte("message1")
+				return nil
+			}
+			if readCalls == 2 {
+				// Second call returns a message for the drain
+				*message = []byte("message2")
+				return nil
+			}
+			// Third call returns error
+			return ErrExpected
+		}).AnyTimes()
+
+		go func() {
+			err := transport.wsReadLoop()
+			assert.Equal(t, ErrExpected, err)
+		}()
+
+		// Receive the first message
+		select {
+		case msg := <-messages:
+			assert.Equal(t, []byte("message1"), msg)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for message")
+		}
+
+		// Signal stop to test drain logic with stopPooling signal
+		transport.stopPooling <- struct{}{}
+
+		// The error should still be reported
+		select {
+		case err := <-onClose:
+			assert.Equal(t, ErrExpected, err)
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for onClose")
+		}
+	})
+
 
 }
 
