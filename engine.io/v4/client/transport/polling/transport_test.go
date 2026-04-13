@@ -654,6 +654,63 @@ func TestPoll(t *testing.T) {
 		err := client.poll()
 		assert.Error(t, err)
 	})
+
+	t.Run("Poll with context canceled during message send", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+		// Create a context that will be canceled
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Create an unbuffered channel to block the send
+		messagesChan := make(chan []byte)
+
+		client := &Transport{
+			log:        mockLogger,
+			httpClient: mockHTTPClient,
+			url:        &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:        "test-sid",
+			ctx:        ctx,
+			messages:   messagesChan,
+		}
+
+		mockLogger.EXPECT().Debugf("run polling")
+		mockLogger.EXPECT().Debugf("receiveHttp: %s", "test response")
+
+		mockResp := &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader("test response")),
+		}
+
+		mockHTTPClient.EXPECT().
+			Do(gomock.Any()).
+			Return(mockResp, nil)
+
+		// Run poll in a goroutine and cancel the context while it's trying to send
+		done := make(chan error, 1)
+		go func() {
+			done <- client.poll()
+		}()
+
+		// Give poll time to get the response and try to send the message
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+
+		// Wait for poll to return with context.Canceled error
+		select {
+		case err := <-done:
+			assert.Error(t, err)
+			assert.True(t, errors.Is(err, context.Canceled))
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for poll to return with context canceled")
+		}
+	})
 }
 
 func TestSendMessage(t *testing.T) {

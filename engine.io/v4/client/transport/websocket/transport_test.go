@@ -655,3 +655,56 @@ func TestTransport_wsReadLoop_onClose_full_on_context_cancel(t *testing.T) {
 	cancel()
 	time.Sleep(50 * time.Millisecond)
 }
+
+func TestTransport_wsReadLoop_message_context_cancel(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+	mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create an unbuffered messages channel to block the send
+	messages := make(chan []byte)
+	onClose := make(chan error, 1)
+
+	transport := &Transport{
+		log:         mockLogger,
+		ws:          mockWS,
+		ctx:         ctx,
+		messages:    messages,
+		onClose:     onClose,
+		stopPooling: make(chan struct{}, 1),
+	}
+
+	mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+
+	// Test message context canceled branch (line 160-161)
+	// Return a message that will cause wsReadLoop to block trying to send to unbuffered messages channel
+	mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		*message = []byte("test message")
+		return nil
+	}).Times(1)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.wsReadLoop()
+	}()
+
+	// Give wsReadLoop time to receive the message and attempt to send it to the unbuffered channel
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	// Wait for wsReadLoop to return with context.Canceled
+	select {
+	case err := <-done:
+		assert.Equal(t, context.Canceled, err)
+	case <-time.After(time.Second):
+		t.Fatal("Timeout waiting for wsReadLoop to return with context canceled")
+	}
+}
