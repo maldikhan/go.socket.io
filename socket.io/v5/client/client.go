@@ -38,8 +38,12 @@ type namespace struct {
 	hadConnected  sync.Once
 }
 
+// SetHandshakeData stores a shallow copy of the provided map as the handshake
+// payload. Top-level keys are detached from the caller's map, but nested
+// maps/slices are still shared. Callers must not mutate nested values after
+// calling SetHandshakeData, or supply only flat/JSON-primitive values.
 func (c *Client) SetHandshakeData(data map[string]interface{}) {
-	// Make a copy to prevent external mutation after set
+	// Make a shallow copy to prevent external mutation of top-level keys
 	dataCopy := make(map[string]interface{})
 	for k, v := range data {
 		dataCopy[k] = v

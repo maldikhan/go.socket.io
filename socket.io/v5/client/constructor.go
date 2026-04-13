@@ -1,6 +1,7 @@
 package socketio_v5_client
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -21,6 +22,7 @@ type InitClient struct {
 func NewClient(options ...ClientOption) (*Client, error) {
 	client := &InitClient{
 		Client: &Client{
+			ctx:           context.Background(), // safe default so Emit before Connect won't panic
 			handshakeData: make(map[string]interface{}),
 			namespaces:    make(map[string]*namespace),
 			ackCallbacks:  make(map[int]func([]interface{})),

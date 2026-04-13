@@ -208,12 +208,15 @@ func TestConcurrentConnectAndEmit(t *testing.T) {
 		handshakeData:    make(map[string]interface{}),
 	}
 
-	// Create default namespace without waitConnected (nil) so Emit skips the select
+	// Create default namespace with a pre-closed waitConnected channel
+	// so Emit exercises the ctx snapshot path without blocking
+	alreadyConnected := make(chan struct{})
+	close(alreadyConnected)
 	client.defaultNs = &namespace{
 		client:        client,
 		name:          "/",
 		handlers:      make(map[string][]func([]interface{})),
-		waitConnected: nil,
+		waitConnected: alreadyConnected,
 	}
 
 	mockEngineIO.EXPECT().Connect(ctx).Return(nil).AnyTimes()
