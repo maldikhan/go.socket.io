@@ -526,41 +526,47 @@ func TestTransport_wsReadLoop_onClose_already_full(t *testing.T) {
 	mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
 	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
-	// Test stopPooling default: branch (line 142-143)
+	// Test stopPooling default: branch - send stopPooling signal BEFORE first Receive completes
+	// so wsReadLoop sees stopPooling in the select
+	stopPoolingCalled := make(chan struct{})
 	mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
-		*message = []byte("test")
-		return nil
-	}).Times(1)
-	mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		// Signal that we're about to wait for either stopPooling or more data
+		close(stopPoolingCalled)
+		// Block until context is canceled
 		<-transport.ctx.Done()
 		return nil
 	}).Times(1)
 
+	done := make(chan error, 1)
 	go func() {
-		err := transport.wsReadLoop()
-		assert.NoError(t, err)
+		done <- transport.wsReadLoop()
 	}()
 
-	// Check message is received
+	// Wait for Receive to be called and ready to process stopPooling
+	<-stopPoolingCalled
+	time.Sleep(10 * time.Millisecond)
+
+	// Now send stopPooling - wsReadLoop will try to send to onClose but it's full,
+	// so it hits the default: branch and returns nil
+	close(transport.stopPooling)
+
+	// Wait for wsReadLoop to exit
 	select {
-	case msg := <-messages:
-		assert.Equal(t, []byte("test"), msg)
+	case err := <-done:
+		assert.NoError(t, err)
 	case <-time.After(time.Second):
-		t.Fatal("Timeout waiting for message")
+		t.Fatal("Timeout waiting for wsReadLoop to exit")
 	}
 
-	// Trigger stopPooling with onClose buffer already full
-	transport.stopPooling <- struct{}{}
+	// Verify pre-filled error is still in onClose (not replaced)
 	select {
 	case err := <-onClose:
 		assert.Equal(t, "pre-filled error", err.Error())
-	case <-time.After(time.Second):
-		t.Fatal("Timeout waiting for initial onClose")
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Expected pre-filled error to still be in onClose")
 	}
 
-	// wsReadLoop should exit without deadlock
 	cancel()
-	time.Sleep(50 * time.Millisecond)
 }
 
 func TestTransport_wsReadLoop_onClose_full_on_error(t *testing.T) {
@@ -706,5 +712,29 @@ func TestTransport_wsReadLoop_message_context_cancel(t *testing.T) {
 		assert.Equal(t, context.Canceled, err)
 	case <-time.After(time.Second):
 		t.Fatal("Timeout waiting for wsReadLoop to return with context canceled")
+	}
+}
+
+func TestTransport_Stop_non_blocking_default_branch(t *testing.T) {
+	t.Parallel()
+
+	// Create unbuffered stopPooling channel with nobody reading
+	transport := &Transport{
+		stopPooling: make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		// This must complete without deadlock even though stopPooling is full
+		err := transport.Stop()
+		assert.NoError(t, err)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success: Stop returned without blocking via default: branch
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop() deadlocked - failed to execute default: branch")
 	}
 }

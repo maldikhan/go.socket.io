@@ -772,3 +772,27 @@ type errorReader struct {
 func (e *errorReader) Read(p []byte) (n int, err error) {
 	return 0, e.err
 }
+
+func TestStop_non_blocking_default_branch(t *testing.T) {
+	t.Parallel()
+
+	// Create unbuffered stopPooling channel with nobody reading
+	client := &Transport{
+		stopPooling: make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		// This must complete without deadlock even though stopPooling is full
+		err := client.Stop()
+		assert.NoError(t, err)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success: Stop returned without blocking via default: branch
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop() deadlocked - failed to execute default: branch")
+	}
+}
