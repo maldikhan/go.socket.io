@@ -1147,3 +1147,112 @@ func TestConcurrentSetHandshakeAndBuildUrl(t *testing.T) {
 
 	// If there was a race condition, the race detector would catch it
 }
+
+// ctxCanceledDoneNever is a context whose Done() channel never fires (nil
+// channel) but whose Err() reports a non-nil error. It lets a test drive
+// poll() deterministically to the stopCh branch (since ctx.Done() is never
+// selected) while still making RequestHandshake observe a cancelled context.
+type ctxCanceledDoneNever struct {
+	context.Context
+	err error
+}
+
+func (c ctxCanceledDoneNever) Done() <-chan struct{} { return nil }
+func (c ctxCanceledDoneNever) Err() error            { return c.err }
+
+// TestRequestHandshake_StopWithCancelledContext covers the branch in
+// RequestHandshake where poll() returns errTransportStopped AND the context
+// already carries an error: the public cancellation error from ctx.Err() must
+// be returned (not the context.Canceled fallback).
+func TestRequestHandshake_StopWithCancelledContext(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+	stopCh := make(chan struct{})
+	close(stopCh) // Stop() already signalled
+
+	client := &Transport{
+		log:         mockLogger,
+		httpClient:  mockHTTPClient,
+		url:         &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+		ctx:         ctxCanceledDoneNever{Context: context.Background(), err: context.DeadlineExceeded},
+		messages:    make(chan []byte), // unbuffered: the send blocks
+		stopPooling: make(chan struct{}, 1),
+		stopCh:      stopCh,
+	}
+
+	mockLogger.EXPECT().Debugf("run polling")
+	mockLogger.EXPECT().Debugf("receiveHttp: %s", "data")
+
+	mockHTTPClient.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader("data")),
+	}, nil)
+
+	err := client.RequestHandshake()
+	// The error must come from ctx.Err() (DeadlineExceeded), proving the
+	// ctxErr branch ran rather than the context.Canceled fallback.
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.NotErrorIs(t, err, errTransportStopped)
+}
+
+// TestPollingLoop_StopDuringPoll covers the branch in pollingLoop where the
+// inner poll() returns errTransportStopped (Stop() was signalled while poll was
+// blocked delivering a message): the loop must stop cleanly and notify onClose.
+func TestPollingLoop_StopDuringPoll(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+	stopCh := make(chan struct{})
+	close(stopCh) // Stop() already signalled
+
+	onClose := make(chan error, 1)
+	client := &Transport{
+		log:         mockLogger,
+		httpClient:  mockHTTPClient,
+		pinger:      time.NewTicker(time.Millisecond),
+		url:         &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+		ctx:         context.Background(),
+		messages:    make(chan []byte), // unbuffered: poll's send blocks
+		stopPooling: make(chan struct{}, 1),
+		stopCh:      stopCh,
+		onClose:     onClose,
+	}
+
+	mockLogger.EXPECT().Debugf("run polling").AnyTimes()
+	mockLogger.EXPECT().Debugf("receiveHttp: %s", "data").AnyTimes()
+	mockLogger.EXPECT().Debugf("stop polling")
+
+	mockHTTPClient.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader("data")),
+	}, nil).AnyTimes()
+
+	done := make(chan error, 1)
+	go func() { done <- client.pollingLoop() }()
+
+	select {
+	case err := <-done:
+		assert.NoError(t, err) // errTransportStopped is handled internally -> nil
+	case <-time.After(time.Second):
+		t.Fatal("pollingLoop did not stop when poll() was interrupted by Stop()")
+	}
+
+	// onClose is notified with ctx.Err() (nil for a live background context).
+	select {
+	case err := <-onClose:
+		assert.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("pollingLoop did not notify onClose on stop")
+	}
+}
