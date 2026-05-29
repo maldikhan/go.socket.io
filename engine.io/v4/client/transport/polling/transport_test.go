@@ -91,6 +91,57 @@ func TestTransport(t *testing.T) {
 	assert.Equal(t, engineio_v4.TransportPolling, client.Transport())
 }
 
+func TestRequestHandshake_StopDuringHandshake(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stopCh := make(chan struct{})
+
+	client := &Transport{
+		log:         mockLogger,
+		httpClient:  mockHTTPClient,
+		url:         &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+		ctx:         ctx,
+		messages:    make(chan []byte), // unbuffered: send will block
+		stopPooling: make(chan struct{}, 1),
+		stopCh:      stopCh,
+	}
+
+	mockLogger.EXPECT().Debugf("run polling")
+	mockLogger.EXPECT().Debugf("receiveHttp: %s", "data")
+
+	mockHTTPClient.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader("data")),
+	}, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.RequestHandshake()
+	}()
+
+	// Close stopCh to simulate Stop() while the handshake response is pending.
+	close(stopCh)
+
+	select {
+	case err := <-done:
+		// errTransportStopped must not escape: RequestHandshake maps it to
+		// context.Canceled so API callers never see the internal sentinel.
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.NotErrorIs(t, err, errTransportStopped)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("RequestHandshake blocked indefinitely when stop was signalled")
+	}
+}
+
 func TestRun(t *testing.T) {
 	t.Parallel()
 
@@ -113,6 +164,7 @@ func TestRun(t *testing.T) {
 		pinger:      time.NewTicker(time.Millisecond),
 		url:         url,
 		stopPooling: make(chan struct{}, 1),
+		stopCh:      make(chan struct{}),
 	}
 
 	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
@@ -261,6 +313,7 @@ func TestPollingLoop(t *testing.T) {
 			log:         mockLogger,
 			pinger:      time.NewTicker(10 * time.Millisecond),
 			stopPooling: make(chan struct{}, 1),
+			stopCh:      make(chan struct{}),
 			ctx:         ctx,
 			onClose:     onClose,
 			messages:    make(chan []byte, 1),
@@ -362,9 +415,11 @@ func TestStop(t *testing.T) {
 	t.Run("Stop non-blocking when pollingLoop already exited", func(t *testing.T) {
 		t.Parallel()
 
-		// stopPooling is unbuffered and nobody is reading — Stop must not deadlock
+		// stopPooling is unbuffered and nobody is reading — Stop must not deadlock.
+		// stopCh must be initialised so Stop() can close it without panicking.
 		client := &Transport{
 			stopPooling: make(chan struct{}),
+			stopCh:      make(chan struct{}),
 		}
 
 		done := make(chan struct{})
@@ -544,6 +599,106 @@ func TestPoll(t *testing.T) {
 		}
 		err := client.poll()
 		assert.Error(t, err)
+	})
+
+	t.Run("Context cancelled while sending to full messages channel", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		// Unbuffered channel: poll() must not block forever
+		messagesChan := make(chan []byte)
+
+		client := &Transport{
+			log:         mockLogger,
+			httpClient:  mockHTTPClient,
+			url:         &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:         "test-sid",
+			ctx:         ctx,
+			messages:    messagesChan,
+			stopPooling: make(chan struct{}, 1),
+			stopCh:      make(chan struct{}),
+		}
+
+		mockLogger.EXPECT().Debugf("run polling")
+		mockLogger.EXPECT().Debugf("receiveHttp: %s", "data")
+
+		mockResp := &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader("data")),
+		}
+		mockHTTPClient.EXPECT().Do(gomock.Any()).Return(mockResp, nil)
+
+		done := make(chan error, 1)
+		go func() {
+			done <- client.poll()
+		}()
+
+		// Cancel context while poll() is blocked on the full channel
+		cancel()
+
+		select {
+		case err := <-done:
+			assert.ErrorIs(t, err, context.Canceled)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("poll() blocked indefinitely when messages channel was full and context was cancelled")
+		}
+	})
+
+	t.Run("Stop signalled while sending to full messages channel", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+		// poll() selects on stopCh (a closed channel), not stopPooling.
+		// Close stopCh to simulate Stop() being called while poll() is blocked.
+		stopCh := make(chan struct{})
+
+		client := &Transport{
+			log:         mockLogger,
+			httpClient:  mockHTTPClient,
+			url:         &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:         "test-sid",
+			ctx:         context.Background(),
+			messages:    make(chan []byte), // unbuffered: send will block
+			stopPooling: make(chan struct{}, 1),
+			stopCh:      stopCh,
+		}
+
+		mockLogger.EXPECT().Debugf("run polling")
+		mockLogger.EXPECT().Debugf("receiveHttp: %s", "data")
+
+		mockResp := &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader("data")),
+		}
+		mockHTTPClient.EXPECT().Do(gomock.Any()).Return(mockResp, nil)
+
+		done := make(chan error, 1)
+		go func() {
+			done <- client.poll()
+		}()
+
+		// Close stopCh while poll() is blocked on the full channel.
+		// This simulates Stop() broadcasting the stop signal.
+		close(stopCh)
+
+		select {
+		case err := <-done:
+			assert.ErrorIs(t, err, errTransportStopped)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("poll() blocked indefinitely when messages channel was full and stop was signalled")
+		}
 	})
 }
 

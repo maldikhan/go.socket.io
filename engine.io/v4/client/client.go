@@ -214,11 +214,13 @@ func (c *Client) handleHandshake(data []byte) error {
 		close(c.waitHandshake)
 	})
 
-	// Call onConnect hook after the transport upgrade has completed so
-	// that the new transport is fully ready before any callback tries
-	// to send data.
+	// Call onConnect hook in a goroutine so that messageLoop can continue
+	// processing engine.io packets (e.g. the WebSocket upgrade probe response
+	// "3probe") while the hook is running. If afterConnect calls Send(),
+	// Send() waits on waitUpgrade, which is only closed after messageLoop
+	// processes "3probe" — calling afterConnect inline would deadlock.
 	if c.afterConnect != nil {
-		c.afterConnect()
+		go c.afterConnect()
 	}
 
 	return nil

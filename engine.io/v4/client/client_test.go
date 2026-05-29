@@ -382,17 +382,27 @@ func TestClient_handleHandshake(t *testing.T) {
 
 		// Track the order: afterConnect must observe the websocket
 		// transport (i.e. the upgrade must have finished already).
+		// afterConnect runs in a goroutine, so we synchronize with a channel.
 		var transportDuringCallback Transport
+		afterConnectDone := make(chan struct{})
 		client.afterConnect = func() {
 			transportDuringCallback = client.transport
+			close(afterConnectDone)
 		}
 
 		client.hadHandshake = sync.Once{}
 		client.waitHandshake = make(chan struct{})
 		err := client.handleHandshake(data)
 		require.NoError(t, err)
+
+		select {
+		case <-afterConnectDone:
+		case <-time.After(100 * time.Millisecond):
+			require.Fail(t, "afterConnect goroutine did not complete in time")
+		}
 		assert.Equal(t, mockTransportWs, transportDuringCallback,
 			"afterConnect must be called after transport upgrade")
+		client.afterConnect = nil
 	})
 
 	t.Run("Handshake with upgrade failure", func(t *testing.T) {

@@ -33,7 +33,9 @@ func (c *Client) onMessage(data []byte) {
 		return
 	}
 
+	c.mutex.RLock()
 	ns := c.namespaces[msg.NS]
+	c.mutex.RUnlock()
 
 	switch msg.Type {
 	case socketio_v5.PacketDisconnect:

@@ -191,6 +191,70 @@ func TestClientOnMessage(t *testing.T) {
 	})
 }
 
+// TestOnMessage_NamespaceLock verifies that onMessage holds c.mutex while reading
+// c.namespaces, preventing a data race with concurrent namespace() calls.
+// Run with -race to detect any violation.
+func TestOnMessage_NamespaceLock(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockParser := mocks.NewMockParser(ctrl)
+	mockLogger := mocks.NewMockLogger(ctrl)
+
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Infof(gomock.Any(), gomock.Any()).AnyTimes()
+
+	ns := &namespace{handlers: make(map[string][]func([]interface{}))}
+
+	client := &Client{
+		parser:     mockParser,
+		logger:     mockLogger,
+		namespaces: map[string]*namespace{"/": ns},
+	}
+
+	// onMessage reads c.namespaces under c.mutex.RLock (the fix).
+	// namespace() writes c.namespaces under c.mutex.Lock.
+	// Running them concurrently must not trigger the race detector.
+
+	msg := &socketio_v5.Message{
+		NS:    "/",
+		Type:  socketio_v5.PacketEvent,
+		Event: &socketio_v5.Event{Name: "evt"},
+	}
+	mockParser.EXPECT().Parse(gomock.Any()).Return(msg, nil).AnyTimes()
+
+	var wg sync.WaitGroup
+	const iterations = 50
+
+	wg.Add(iterations)
+	for i := 0; i < iterations; i++ {
+		go func() {
+			defer wg.Done()
+			client.onMessage([]byte("data"))
+		}()
+	}
+
+	wg.Add(iterations)
+	for i := 0; i < iterations; i++ {
+		go func() {
+			defer wg.Done()
+			client.namespace("/extra")
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent onMessage + namespace() timed out")
+	}
+}
+
 func TestClientHandleEvent(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

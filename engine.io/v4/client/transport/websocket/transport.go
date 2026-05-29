@@ -149,7 +149,17 @@ func (c *Transport) wsReadLoop() error {
 		case message := <-messageCh:
 			// New message received
 			c.log.Debugf("receiveWs: %s", message)
-			c.messages <- message
+			select {
+			case c.messages <- message:
+			case <-c.stopPooling:
+				c.log.Debugf("Stop requested, exiting ws read loop")
+				c.onClose <- nil
+				return nil
+			case <-c.ctx.Done():
+				c.log.Debugf("Context cancelled, exiting ws read loop")
+				c.onClose <- c.ctx.Err()
+				return c.ctx.Err()
+			}
 
 		case err := <-errorCh:
 			// WebSocket error
