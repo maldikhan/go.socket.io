@@ -1276,3 +1276,18 @@ func TestConcurrentSetHandshakeAndBuildUrl(t *testing.T) {
 
 	// If there was a race condition, the race detector would catch it
 }
+
+func TestTransport_payloadRedaction(t *testing.T) {
+	c := &Transport{redactPayload: true}
+	assert.Equal(t, "[redacted 5 bytes]", c.payload([]byte("hello")))
+	c.redactPayload = false
+	assert.Equal(t, "hello", c.payload([]byte("hello")))
+}
+
+func TestTransport_WithDebugPayload(t *testing.T) {
+	c := &Transport{}
+	assert.NoError(t, WithDebugPayload(true)(c))
+	assert.False(t, c.redactPayload)
+	assert.NoError(t, WithDebugPayload(false)(c))
+	assert.True(t, c.redactPayload)
+}

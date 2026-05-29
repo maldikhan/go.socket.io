@@ -2,6 +2,7 @@ package engineio_v4_client_transport
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"sync"
 
@@ -21,6 +22,18 @@ type Transport struct {
 	onClose     chan<- error
 	stopPooling chan struct{}
 	mu          sync.RWMutex
+
+	// redactPayload, when true, replaces raw payloads in debug logs with a
+	// size marker. Zero value is verbose; NewTransport sets the safe default.
+	redactPayload bool
+}
+
+// payload returns a size marker when redaction is enabled, or the raw data.
+func (c *Transport) payload(data []byte) string {
+	if c.redactPayload {
+		return fmt.Sprintf("[redacted %d bytes]", len(data))
+	}
+	return string(data)
 }
 
 func (c *Transport) Transport() engineio_v4.EngineIOTransport {
@@ -170,7 +183,7 @@ func (c *Transport) wsReadLoop() error {
 
 		case message := <-messageCh:
 			// New message received
-			c.log.Debugf("receiveWs: %s", message)
+			c.log.Debugf("receiveWs: %s", c.payload(message))
 			select {
 			case c.messages <- message:
 			case <-c.stopPooling:
@@ -202,6 +215,6 @@ func (c *Transport) wsReadLoop() error {
 }
 
 func (c *Transport) SendMessage(msg []byte) error {
-	c.log.Debugf("sendWs: %s", string(msg))
+	c.log.Debugf("sendWs: %s", c.payload(msg))
 	return c.ws.Send(msg)
 }

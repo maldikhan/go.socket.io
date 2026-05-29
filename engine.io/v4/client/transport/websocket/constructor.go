@@ -13,9 +13,10 @@ type EngineTransportOption func(*Transport) error
 func NewTransport(options ...EngineTransportOption) (*Transport, error) {
 	// Создаем клиент с настройками по умолчанию
 	client := &Transport{
-		log:         &utils.DefaultLogger{},
-		ws:          &ws_native.WebSocketConnection{},
-		stopPooling: make(chan struct{}, 1),
+		log:           &utils.DefaultLogger{},
+		ws:            &ws_native.WebSocketConnection{},
+		stopPooling:   make(chan struct{}, 1),
+		redactPayload: true, // production-safe default; WithDebugPayload(true) opts out
 	}
 
 	// Применяем пользовательские настройки
@@ -53,6 +54,15 @@ func WithWebSocket(ws WebSocket) EngineTransportOption {
 func WithOrigin(origin *url.URL) EngineTransportOption {
 	return func(c *Transport) error {
 		c.origin = origin
+		return nil
+	}
+}
+
+// WithDebugPayload enables logging of raw payloads at debug level.
+// Disabled by default so production logs don't leak message contents.
+func WithDebugPayload(enabled bool) EngineTransportOption {
+	return func(c *Transport) error {
+		c.redactPayload = !enabled
 		return nil
 	}
 }

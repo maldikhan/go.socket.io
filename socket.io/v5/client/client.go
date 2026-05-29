@@ -2,6 +2,7 @@ package socketio_v5_client
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
@@ -23,6 +24,18 @@ type Client struct {
 
 	ackCallbacks map[int]func([]interface{})
 	ackCounter   int
+
+	// redactPayload, when true, replaces raw payloads in debug logs with a
+	// size marker. Zero value is verbose; NewClient sets the safe default.
+	redactPayload bool
+}
+
+// payload returns a size marker when redaction is enabled, or the raw data.
+func (c *Client) payload(data []byte) string {
+	if c.redactPayload {
+		return fmt.Sprintf("[redacted %d bytes]", len(data))
+	}
+	return string(data)
 }
 
 type namespace struct {

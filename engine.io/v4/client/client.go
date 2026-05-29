@@ -46,6 +46,22 @@ type Client struct {
 	// On() writes them from the user goroutine, while handlePacket()
 	// and handleHandshake() read them from the transport goroutine.
 	handlerMu sync.RWMutex
+
+	// redactPayload, when true, replaces raw packet payloads in debug logs
+	// with a size marker so production logs never leak message contents
+	// (tokens, PII). The zero value is "don't redact" (verbose); NewClient
+	// sets the production-safe default and WithDebugPayload(true) disables it.
+	redactPayload bool
+}
+
+// payload returns a size marker for debug logging when payload redaction is
+// enabled, or the raw data otherwise. The packet type/prefix stays visible
+// either way.
+func (c *Client) payload(data []byte) string {
+	if c.redactPayload {
+		return fmt.Sprintf("[redacted %d bytes]", len(data))
+	}
+	return string(data)
 }
 
 func (c *Client) Connect(ctx context.Context) error {
@@ -161,7 +177,7 @@ func (c *Client) transportUpgrade(transport Transport) error {
 }
 
 func (c *Client) handleHandshake(data []byte) error {
-	c.log.Debugf("apply handshake: %s", string(data))
+	c.log.Debugf("apply handshake: %s", c.payload(data))
 
 	handshakeResp := &engineio_v4.HandshakeResponse{}
 	err := json.Unmarshal(data, handshakeResp)
@@ -244,14 +260,14 @@ func (c *Client) handleHandshake(data []byte) error {
 }
 
 func (c *Client) handlePacket(packetData []byte) error {
-	c.log.Debugf("handle packet: %s", string(packetData))
+	c.log.Debugf("handle packet: %s", c.payload(packetData))
 	packet, err := c.parser.Parse(packetData)
 	if err != nil {
 		c.log.Errorf("Can't parse packet: %s %v", string(packetData), err)
 		return err
 	}
 
-	c.log.Debugf("handle: %d %s", packet.Type, packet.Data)
+	c.log.Debugf("handle: %d %s", packet.Type, c.payload(packet.Data))
 
 	switch packet.Type {
 	case engineio_v4.PacketOpen:

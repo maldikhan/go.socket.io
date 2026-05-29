@@ -25,7 +25,7 @@ func (n *namespace) OnAny(handler func(string, []interface{})) {
 }
 
 func (c *Client) onMessage(data []byte) {
-	c.logger.Debugf("socketio receive %s", string(data))
+	c.logger.Debugf("socketio receive %s", c.payload(data))
 
 	msg, err := c.parser.Parse(data)
 	if err != nil {
