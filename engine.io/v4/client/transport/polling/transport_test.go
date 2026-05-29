@@ -1011,3 +1011,95 @@ func TestPollOversizedPayload(t *testing.T) {
 		}
 	})
 }
+
+func TestRun_stopped_flag_reset(t *testing.T) {
+	// Test that Run() resets the stopped flag and reinitializes stopPooling
+	// to allow the transport to be reused after Stop()
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockHttpClient := mocks.NewMockHttpClient(ctrl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	url, _ := url.Parse("http://example.com")
+	messagesChan := make(chan []byte, 1)
+	onCloseChan := make(chan error, 1)
+
+	client := &Transport{
+		log:         mockLogger,
+		httpClient:  mockHttpClient,
+		pinger:      time.NewTicker(time.Millisecond),
+		url:         url,
+		stopPooling: make(chan struct{}, 1),
+	}
+
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
+
+	// Mock the poll method to avoid actual HTTP requests
+	mockHttpClient.EXPECT().
+		Do(gomock.Any()).
+		Return(&http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader("test response")),
+		}, nil).
+		AnyTimes()
+
+	t.Run("Run -> Stop -> Run -> Stop", func(t *testing.T) {
+		// First Run
+		err := client.Run(ctx, url, "test-sid-1", messagesChan, onCloseChan)
+		assert.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+
+		// First Stop
+		assert.NoError(t, client.Stop())
+		select {
+		case <-onCloseChan:
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("Timeout waiting for first onClose signal")
+		}
+
+		// Verify stopped flag is set
+		stoppedBefore := atomic.LoadUint32(&client.stopped)
+		assert.Equal(t, uint32(1), stoppedBefore, "stopped flag should be 1 after Stop()")
+
+		// Reset channels for second run
+		onCloseChan = make(chan error, 1)
+		client.pinger = time.NewTicker(time.Millisecond)
+
+		// Second Run - this should reset the stopped flag and reinitialize stopPooling
+		err = client.Run(ctx, url, "test-sid-2", messagesChan, onCloseChan)
+		assert.NoError(t, err)
+
+		// Verify stopped flag is reset
+		stoppedAfter := atomic.LoadUint32(&client.stopped)
+		assert.Equal(t, uint32(0), stoppedAfter, "stopped flag should be 0 after second Run()")
+
+		time.Sleep(10 * time.Millisecond)
+
+		// Second Stop should work without hanging
+		done := make(chan struct{})
+		go func() {
+			assert.NoError(t, client.Stop())
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// Stop succeeded
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("Second Stop() should not hang - stopped flag was not reset properly")
+		}
+
+		select {
+		case <-onCloseChan:
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("Timeout waiting for second onClose signal")
+		}
+	})
+}
