@@ -33,18 +33,9 @@ func (c *Client) onMessage(data []byte) {
 		return
 	}
 
-	c.mutex.RLock()
-	ns := c.namespaces[msg.NS]
-	c.mutex.RUnlock()
-
-	switch msg.Type {
-	case socketio_v5.PacketDisconnect:
-		c.handleDisconnect(ns, msg.Payload)
-	case socketio_v5.PacketConnect:
-		c.handleConnect(ns, msg.Payload)
-	case socketio_v5.PacketEvent:
-		c.handleEvent(ns, msg.Event)
-	case socketio_v5.PacketAck:
+	// Handle ACK packets first — they don't carry a meaningful namespace,
+	// so they must not be dropped by the unknown-namespace guard below.
+	if msg.Type == socketio_v5.PacketAck {
 		if msg.AckId == nil {
 			c.logger.Errorf("received ACK packet without ack ID, dropping")
 			return
@@ -58,6 +49,33 @@ func (c *Client) onMessage(data []byte) {
 			return
 		}
 		c.handleAck(msg.Event, *msg.AckId)
+		return
+	}
+
+	// Safely read namespace under RLock to prevent race condition
+	c.mutex.RLock()
+	ns := c.namespaces[msg.NS]
+	c.mutex.RUnlock()
+
+	// Handle nil namespace case
+	if ns == nil {
+		// For PacketConnect, auto-create the namespace
+		if msg.Type == socketio_v5.PacketConnect {
+			ns = c.namespace(msg.NS)
+		} else {
+			// For other packet types, log warning and return
+			c.logger.Warnf("Received %v for unknown namespace: %s", msg.Type, msg.NS)
+			return
+		}
+	}
+
+	switch msg.Type {
+	case socketio_v5.PacketDisconnect:
+		c.handleDisconnect(ns, msg.Payload)
+	case socketio_v5.PacketConnect:
+		c.handleConnect(ns, msg.Payload)
+	case socketio_v5.PacketEvent:
+		c.handleEvent(ns, msg.Event)
 	case socketio_v5.PacketConnectError:
 		c.handleConnectError(ns, msg.Payload)
 		c.logger.Errorf("Connect error: %v", *msg.ErrorMessage)

@@ -95,6 +95,15 @@ func (c *Transport) Run(
 	c.url = url
 	c.messages = messagesChan
 	c.onClose = onClose
+	// Reset the stop state so the transport can be safely reused after a Stop().
+	atomic.StoreUint32(&c.stopped, 0)
+	// Reinitialize stopPooling channel to ensure fresh channel for new run.
+	c.stopPooling = make(chan struct{}, 1)
+	// Reinitialize the stop broadcast channel and its sync.Once as well —
+	// otherwise a reused transport would observe the previously-closed stopCh
+	// (and the spent stopOnce) and poll() would bail out immediately.
+	c.stopCh = make(chan struct{})
+	c.stopOnce = sync.Once{}
 
 	go func() {
 		c.pinger.Stop()
