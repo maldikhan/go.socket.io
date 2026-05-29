@@ -180,7 +180,13 @@ func (c *Client) handleHandshake(data []byte) error {
 
 	c.sid = handshakeResp.Sid
 	if handshakeResp.PingInterval != 0 {
-		c.pingInterval = time.NewTicker(time.Duration(handshakeResp.PingInterval) * time.Millisecond)
+		if c.pingInterval != nil {
+			// Reset reuses the existing ticker (shared with the polling transport),
+			// so we don't break the transport's pinger reference.
+			c.pingInterval.Reset(time.Duration(handshakeResp.PingInterval) * time.Millisecond)
+		} else {
+			c.pingInterval = time.NewTicker(time.Duration(handshakeResp.PingInterval) * time.Millisecond)
+		}
 	}
 
 	if handshakeResp.PingTimeout != 0 {
@@ -220,14 +226,18 @@ func (c *Client) handleHandshake(data []byte) error {
 		close(c.waitHandshake)
 	})
 
-	// Call onConnect hook after the transport upgrade has completed so
-	// that the new transport is fully ready before any callback tries
-	// to send data.
+	// Call onConnect hook in a goroutine so that messageLoop can continue
+	// processing engine.io packets (e.g. the WebSocket upgrade probe response
+	// "3probe") while the hook is running. If afterConnect calls Send(),
+	// Send() waits on waitUpgrade, which is only closed after messageLoop
+	// processes "3probe" — calling afterConnect inline would deadlock.
+	// The handler is copied under handlerMu so a concurrent On() registration
+	// is race-free, and invoked via the local copy (never c.afterConnect).
 	c.handlerMu.RLock()
 	handler := c.afterConnect
 	c.handlerMu.RUnlock()
 	if handler != nil {
-		handler()
+		go handler()
 	}
 
 	return nil
@@ -365,6 +375,11 @@ func (c *Client) Close() error {
 	t := c.transport
 	c.transport = nil
 	c.transportMu.Unlock()
+
+	// Stop the ping ticker to prevent goroutine leak
+	if c.pingInterval != nil {
+		c.pingInterval.Stop()
+	}
 
 	if t == nil {
 		return nil

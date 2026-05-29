@@ -17,6 +17,7 @@ func NewTransport(options ...EngineTransportOption) (*Transport, error) {
 		httpClient:  &http.Client{},
 		pinger:      time.NewTicker(10 * time.Second),
 		stopPooling: make(chan struct{}, 1),
+		stopCh:      make(chan struct{}),
 	}
 
 	// Apply options

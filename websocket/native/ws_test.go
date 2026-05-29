@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -183,6 +184,69 @@ func TestWebSocketConnection_Close(t *testing.T) {
 		ws := &WebSocketConnection{}
 		err := ws.Close()
 		assert.NoError(t, err, "Close should return nil for uninitialized connection")
+	})
+}
+
+func TestWebSocketConnection_ConcurrentSend(t *testing.T) {
+
+	ctx := context.Background()
+
+	origin, err := url.Parse("http://localhost")
+	require.NoError(t, err, "Failed to parse server URL")
+
+	t.Run("Concurrent Send calls are safe", func(t *testing.T) {
+		t.Parallel()
+
+		receivedChan := make(chan string, 10)
+		server := createTestServer(t, receivedChan)
+		defer server.Close()
+
+		url, err := url.Parse(server.URL)
+		require.NoError(t, err, "Failed to parse server URL")
+		url.Scheme = "ws"
+
+		ws := &WebSocketConnection{}
+		err = ws.Dial(ctx, url, origin)
+		require.NoError(t, err, "Dial should not return an error")
+		defer func() {
+			_ = ws.Close()
+		}()
+
+		// Launch multiple goroutines sending messages concurrently
+		numGoroutines := 10
+		var wg sync.WaitGroup
+		wg.Add(numGoroutines)
+
+		for i := 0; i < numGoroutines; i++ {
+			go func(id int) {
+				defer wg.Done()
+				message := []byte("Message from goroutine")
+				err := ws.Send(message)
+				assert.NoError(t, err, "Send should not return an error in concurrent goroutine")
+			}(i)
+		}
+
+		wg.Wait()
+
+		// Give the server time to process all messages
+		time.Sleep(100 * time.Millisecond)
+
+		// Verify all messages were received (allowing for echo responses)
+		received := 0
+	Loop:
+		for {
+			select {
+			case <-receivedChan:
+				received++
+			case <-time.After(50 * time.Millisecond):
+				break Loop
+			}
+			if received >= numGoroutines {
+				break
+			}
+		}
+
+		assert.GreaterOrEqual(t, received, numGoroutines, "All messages should be received")
 	})
 }
 

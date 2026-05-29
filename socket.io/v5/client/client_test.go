@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/golang/mock/gomock"
@@ -183,4 +184,134 @@ func TestClose(t *testing.T) {
 	if err != nil {
 		t.Errorf("Close() returned an error: %v", err)
 	}
+}
+
+func TestConcurrentConnectAndEmit(t *testing.T) {
+	// This test ensures no data race when Connect() writes c.ctx
+	// while Emit() reads it concurrently
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockEngineIO := mocks.NewMockEngineIOClient(ctrl)
+	mockParser := mocks.NewMockParser(ctrl)
+	mockLogger := mocks.NewMockLogger(ctrl)
+
+	ctx := context.Background()
+
+	client := &Client{
+		engineio:         mockEngineIO,
+		parser:           mockParser,
+		logger:           mockLogger,
+		ctx:              ctx, // Initialize ctx
+		namespaces:       make(map[string]*namespace),
+		ackCallbacks:     make(map[int]func([]interface{})),
+		handshakeData:    make(map[string]interface{}),
+	}
+
+	// Create default namespace with a pre-closed waitConnected channel
+	// so Emit exercises the ctx snapshot path without blocking
+	alreadyConnected := make(chan struct{})
+	close(alreadyConnected)
+	client.defaultNs = &namespace{
+		client:        client,
+		name:          "/",
+		handlers:      make(map[string][]func([]interface{})),
+		waitConnected: alreadyConnected,
+	}
+
+	mockEngineIO.EXPECT().Connect(ctx).Return(nil).AnyTimes()
+	mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte("packet"), nil).AnyTimes()
+	mockEngineIO.EXPECT().Send(gomock.Any()).Return(nil).AnyTimes()
+
+	// Simulate concurrent Connect and Emit operations
+	done := make(chan bool, 2)
+	go func() {
+		// Simulate Connect writing to c.ctx
+		for i := 0; i < 10; i++ {
+			_ = client.Connect(ctx)
+		}
+		done <- true
+	}()
+
+	go func() {
+		// Simulate Emit reading from c.ctx
+		for i := 0; i < 10; i++ {
+			_ = client.Emit("test_event")
+		}
+		done <- true
+	}()
+
+	<-done
+	<-done
+}
+
+func TestSetHandshakeDataMakesaCopy(t *testing.T) {
+	// This test ensures SetHandshakeData makes a copy to prevent mutation
+	client := &Client{
+		handshakeData: make(map[string]interface{}),
+		mutex:         sync.RWMutex{},
+	}
+
+	originalData := map[string]interface{}{
+		"key1": "value1",
+		"key2": 42,
+	}
+
+	client.SetHandshakeData(originalData)
+
+	// Mutate the original data
+	originalData["key1"] = "mutated"
+
+	// Verify that client.handshakeData is not affected
+	client.mutex.RLock()
+	if client.handshakeData["key1"] != "value1" {
+		t.Errorf("SetHandshakeData() did not make a copy. Got %v, want value1", client.handshakeData["key1"])
+	}
+	client.mutex.RUnlock()
+}
+
+func TestConcurrentSetHandshakeDataAndConnect(t *testing.T) {
+	// This test ensures no data race when SetHandshakeData writes c.handshakeData
+	// while connectSocketIO reads it concurrently
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockParser := mocks.NewMockParser(ctrl)
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockEngineIO := mocks.NewMockEngineIOClient(ctrl)
+
+	client := &Client{
+		parser:        mockParser,
+		logger:        mockLogger,
+		engineio:      mockEngineIO,
+		handshakeData: make(map[string]interface{}),
+		mutex:         sync.RWMutex{},
+	}
+
+	mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte("packet"), nil).AnyTimes()
+	mockEngineIO.EXPECT().Send(gomock.Any()).Return(nil).AnyTimes()
+
+	done := make(chan bool, 2)
+	go func() {
+		// Simulate concurrent SetHandshakeData calls
+		for i := 0; i < 10; i++ {
+			data := map[string]interface{}{
+				"key":   "value",
+				"index": i,
+			}
+			client.SetHandshakeData(data)
+		}
+		done <- true
+	}()
+
+	go func() {
+		// Simulate concurrent connectSocketIO calls
+		for i := 0; i < 10; i++ {
+			client.connectSocketIO(nil)
+		}
+		done <- true
+	}()
+
+	<-done
+	<-done
 }
