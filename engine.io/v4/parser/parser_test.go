@@ -134,3 +134,60 @@ func TestEngineIOV4Parser_Serialize(t *testing.T) {
 		})
 	}
 }
+
+func TestNewEngineIOV4Parser(t *testing.T) {
+	t.Run("Default limit", func(t *testing.T) {
+		p, err := NewEngineIOV4Parser()
+		assert.NoError(t, err)
+		assert.Equal(t, int64(defaultMaxSerializeSize), p.maxSerializeSize)
+	})
+
+	t.Run("Custom limit", func(t *testing.T) {
+		p, err := NewEngineIOV4Parser(WithMaxSerializeSize(1024))
+		assert.NoError(t, err)
+		assert.Equal(t, int64(1024), p.maxSerializeSize)
+	})
+
+	t.Run("Invalid limit propagates error", func(t *testing.T) {
+		p, err := NewEngineIOV4Parser(WithMaxSerializeSize(0))
+		assert.Error(t, err)
+		assert.Nil(t, p)
+	})
+}
+
+func TestWithMaxSerializeSize(t *testing.T) {
+	t.Run("Valid", func(t *testing.T) {
+		p := &EngineIOV4Parser{}
+		assert.NoError(t, WithMaxSerializeSize(2048)(p))
+		assert.Equal(t, int64(2048), p.maxSerializeSize)
+	})
+
+	t.Run("Zero", func(t *testing.T) {
+		assert.Error(t, WithMaxSerializeSize(0)(&EngineIOV4Parser{}))
+	})
+
+	t.Run("Negative", func(t *testing.T) {
+		assert.Error(t, WithMaxSerializeSize(-1)(&EngineIOV4Parser{}))
+	})
+}
+
+func TestEngineIOV4Parser_Serialize_CustomLimit(t *testing.T) {
+	p, err := NewEngineIOV4Parser(WithMaxSerializeSize(4))
+	assert.NoError(t, err)
+
+	// Within the custom limit.
+	got, err := p.Serialize(&engineio_v4.Message{
+		Type: engineio_v4.EngineIOPacket(4),
+		Data: []byte("ok"),
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("4ok"), got)
+
+	// Exceeds the custom limit.
+	_, err = p.Serialize(&engineio_v4.Message{
+		Type: engineio_v4.EngineIOPacket(4),
+		Data: []byte("toolong"),
+	})
+	assert.Error(t, err)
+	assert.Equal(t, "message data too large", err.Error())
+}
