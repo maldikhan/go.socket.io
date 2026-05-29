@@ -3,3 +3,7 @@
 .fleet
 coverage.*
 *.sarif
+
+# e2e Node server dependencies / lockfile (installed in CI/Docker)
+e2e/server/node_modules/
+e2e/server/package-lock.json
