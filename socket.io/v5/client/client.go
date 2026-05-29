@@ -38,14 +38,29 @@ type namespace struct {
 	hadConnected  sync.Once
 }
 
+// SetHandshakeData stores a shallow copy of the provided map as the handshake
+// payload. Top-level keys are detached from the caller's map, but nested
+// maps/slices are still shared. Callers must not mutate nested values after
+// calling SetHandshakeData, or supply only flat/JSON-primitive values.
 func (c *Client) SetHandshakeData(data map[string]interface{}) {
-	c.handshakeData = data
+	// Make a shallow copy to prevent external mutation of top-level keys
+	dataCopy := make(map[string]interface{})
+	for k, v := range data {
+		dataCopy[k] = v
+	}
+	c.mutex.Lock()
+	c.handshakeData = dataCopy
+	c.mutex.Unlock()
 }
 
 func (c *Client) connectSocketIO(_ []byte) {
+	c.mutex.RLock()
+	handshakeData := c.handshakeData
+	c.mutex.RUnlock()
+
 	err := c.sendPacket(&socketio_v5.Message{
 		Type:    socketio_v5.PacketConnect,
-		Payload: c.handshakeData,
+		Payload: handshakeData,
 	})
 
 	if err != nil {
@@ -54,7 +69,9 @@ func (c *Client) connectSocketIO(_ []byte) {
 }
 
 func (c *Client) Connect(ctx context.Context, callbacks ...func(arg interface{})) error {
+	c.mutex.Lock()
 	c.ctx = ctx
+	c.mutex.Unlock()
 	for _, callback := range callbacks {
 		c.On("connect", callback)
 	}
@@ -78,6 +95,17 @@ func (c *Client) namespace(name string) *namespace {
 	}
 	c.namespaces[name] = ns
 	return ns
+}
+
+func (c *Client) safeGo(fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				c.logger.Errorf("panic in event handler: %v", r)
+			}
+		}()
+		fn()
+	}()
 }
 
 func (c *Client) Close() error {

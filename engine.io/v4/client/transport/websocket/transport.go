@@ -46,7 +46,9 @@ func (c *Transport) Run(
 	onClose chan<- error,
 ) error {
 	c.ctx = ctx
+	c.mu.Lock()
 	c.sid = sid
+	c.mu.Unlock()
 	c.url = url
 	c.messages = messagesChan
 	c.onClose = onClose
@@ -127,11 +129,17 @@ func (c *Transport) connectWebSocket() error {
 func (c *Transport) wsReadLoop() error {
 	c.log.Debugf("run ws read loop")
 
-	// Make challel for messages
-	messageCh := make(chan []byte)
-	errorCh := make(chan error)
+	// Buffered (size 1) so that a per-iteration reader goroutine still blocked
+	// in c.ws.Receive() when wsReadLoop returns can always complete its send
+	// and exit, instead of leaking. After wsReadLoop returns, connectWebSocket
+	// calls c.ws.Close(), which unblocks Receive() with an error; the goroutine
+	// then delivers that error into the buffer (no reader required) and exits.
+	// Only one reader goroutine is ever in flight at a time, so a capacity of 1
+	// is sufficient.
+	messageCh := make(chan []byte, 1)
+	errorCh := make(chan error, 1)
 	for {
-		// Run  ws read loop in goroutine
+		// Run ws read in goroutine
 		go func() {
 			var message []byte
 			err := c.ws.Receive(&message)
@@ -145,24 +153,49 @@ func (c *Transport) wsReadLoop() error {
 		select {
 		case <-c.stopPooling:
 			c.log.Debugf("Context cancelled, exiting ws read loop")
-			c.onClose <- nil
+			select {
+			case c.onClose <- nil:
+			default:
+			}
 			return nil
 
 		case <-c.ctx.Done():
 			// Context cancelled
 			c.log.Debugf("Context cancelled, exiting ws read loop")
-			c.onClose <- c.ctx.Err()
+			select {
+			case c.onClose <- c.ctx.Err():
+			default:
+			}
 			return c.ctx.Err()
 
 		case message := <-messageCh:
 			// New message received
 			c.log.Debugf("receiveWs: %s", message)
-			c.messages <- message
+			select {
+			case c.messages <- message:
+			case <-c.stopPooling:
+				c.log.Debugf("Stop signal received, exiting ws read loop")
+				select {
+				case c.onClose <- nil:
+				default:
+				}
+				return nil
+			case <-c.ctx.Done():
+				c.log.Debugf("Context cancelled, exiting ws read loop")
+				select {
+				case c.onClose <- c.ctx.Err():
+				default:
+				}
+				return c.ctx.Err()
+			}
 
 		case err := <-errorCh:
 			// WebSocket error
 			c.log.Errorf("receiveWsError: %v", err)
-			c.onClose <- err
+			select {
+			case c.onClose <- err:
+			default:
+			}
 			return err
 		}
 	}

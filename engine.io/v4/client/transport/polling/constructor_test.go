@@ -207,3 +207,51 @@ func TestWithDefaultPinger(t *testing.T) {
 		t.Errorf("WithDefaultPinger() did not set the pinger correctly")
 	}
 }
+
+func TestWithMaxPayloadSize(t *testing.T) {
+	t.Run("Valid size", func(t *testing.T) {
+		option := WithMaxPayloadSize(8 * 1024 * 1024) // 8MB
+		transport := &Transport{}
+		err := option(transport)
+
+		if err != nil {
+			t.Errorf("WithMaxPayloadSize() returned an error: %v", err)
+		}
+
+		if transport.maxPayloadSize != 8*1024*1024 {
+			t.Errorf("WithMaxPayloadSize() did not set the max payload size correctly, got %d", transport.maxPayloadSize)
+		}
+	})
+
+	t.Run("Zero size", func(t *testing.T) {
+		option := WithMaxPayloadSize(0)
+		transport := &Transport{}
+		err := option(transport)
+
+		if err == nil {
+			t.Errorf("WithMaxPayloadSize() should return an error for zero size")
+		}
+	})
+
+	t.Run("Negative size", func(t *testing.T) {
+		option := WithMaxPayloadSize(-1)
+		transport := &Transport{}
+		err := option(transport)
+
+		if err == nil {
+			t.Errorf("WithMaxPayloadSize() should return an error for negative size")
+		}
+	})
+}
+
+func TestDefaultMaxPayloadSize(t *testing.T) {
+	transport, err := NewTransport()
+	if err != nil {
+		t.Errorf("NewTransport() returned an error: %v", err)
+	}
+
+	expectedSize := int64(4 * 1024 * 1024) // 4MB
+	if transport.maxPayloadSize != expectedSize {
+		t.Errorf("Default maxPayloadSize = %d, want %d", transport.maxPayloadSize, expectedSize)
+	}
+}
