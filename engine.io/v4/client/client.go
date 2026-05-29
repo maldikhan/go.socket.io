@@ -40,6 +40,12 @@ type Client struct {
 	// the waitUpgrade / waitHandshake channels so that Send() never
 	// races with transportUpgrade() or Close().
 	transportMu sync.RWMutex
+
+	// handlerMu protects access to the handler fields
+	// (messageHandler, closeHandler, afterConnect).
+	// On() writes them from the user goroutine, while handlePacket()
+	// and handleHandshake() read them from the transport goroutine.
+	handlerMu sync.RWMutex
 }
 
 func (c *Client) Connect(ctx context.Context) error {
@@ -225,8 +231,13 @@ func (c *Client) handleHandshake(data []byte) error {
 	// "3probe") while the hook is running. If afterConnect calls Send(),
 	// Send() waits on waitUpgrade, which is only closed after messageLoop
 	// processes "3probe" — calling afterConnect inline would deadlock.
-	if c.afterConnect != nil {
-		go c.afterConnect()
+	// The handler is copied under handlerMu so a concurrent On() registration
+	// is race-free, and invoked via the local copy (never c.afterConnect).
+	c.handlerMu.RLock()
+	handler := c.afterConnect
+	c.handlerMu.RUnlock()
+	if handler != nil {
+		go handler()
 	}
 
 	return nil
@@ -252,8 +263,11 @@ func (c *Client) handlePacket(packetData []byte) error {
 			return err
 		}
 	case engineio_v4.PacketClose:
-		if c.closeHandler != nil {
-			c.closeHandler()
+		c.handlerMu.RLock()
+		handler := c.closeHandler
+		c.handlerMu.RUnlock()
+		if handler != nil {
+			handler()
 		}
 	case engineio_v4.PacketPing:
 		err := c.sendPacket(&engineio_v4.Message{
@@ -279,8 +293,11 @@ func (c *Client) handlePacket(packetData []byte) error {
 			}
 		}
 	case engineio_v4.PacketMessage:
-		if c.messageHandler != nil {
-			c.messageHandler(packet.Data)
+		c.handlerMu.RLock()
+		handler := c.messageHandler
+		c.handlerMu.RUnlock()
+		if handler != nil {
+			handler(packet.Data)
 		}
 	}
 	return nil
@@ -336,6 +353,9 @@ func (c *Client) Send(message []byte) error {
 }
 
 func (c *Client) On(event string, handler func([]byte)) {
+	c.handlerMu.Lock()
+	defer c.handlerMu.Unlock()
+
 	switch event {
 	case "connect":
 		c.afterConnect = func() { handler(nil) }
