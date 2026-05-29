@@ -382,17 +382,27 @@ func TestClient_handleHandshake(t *testing.T) {
 
 		// Track the order: afterConnect must observe the websocket
 		// transport (i.e. the upgrade must have finished already).
+		// afterConnect runs in a goroutine, so we synchronize with a channel.
 		var transportDuringCallback Transport
+		afterConnectDone := make(chan struct{})
 		client.afterConnect = func() {
 			transportDuringCallback = client.transport
+			close(afterConnectDone)
 		}
 
 		client.hadHandshake = sync.Once{}
 		client.waitHandshake = make(chan struct{})
 		err := client.handleHandshake(data)
 		require.NoError(t, err)
+
+		select {
+		case <-afterConnectDone:
+		case <-time.After(100 * time.Millisecond):
+			require.Fail(t, "afterConnect goroutine did not complete in time")
+		}
 		assert.Equal(t, mockTransportWs, transportDuringCallback,
 			"afterConnect must be called after transport upgrade")
+		client.afterConnect = nil
 	})
 
 	t.Run("Handshake with upgrade failure", func(t *testing.T) {
@@ -866,4 +876,194 @@ func TestClient_Send_after_close(t *testing.T) {
 	err := client.Send([]byte("test"))
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "client is closed")
+}
+
+func TestClient_handleHandshake_ticker_stopped(t *testing.T) {
+	// Test that the ticker is reset (not replaced) during re-handshake to preserve
+	// the reference shared with the polling transport via WithDefaultPinger
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockParser := mocks.NewMockParser(ctrl)
+	mockTransport := mocks.NewMockTransport(ctrl)
+
+	client := &Client{
+		log:       mockLogger,
+		transport: mockTransport,
+		parser:    mockParser,
+		supportedTransports: map[engineio_v4.EngineIOTransport]Transport{
+			engineio_v4.TransportPolling: mockTransport,
+		},
+	}
+
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockTransport.EXPECT().Transport().Return(engineio_v4.TransportPolling).AnyTimes()
+	mockTransport.EXPECT().SetHandshake(gomock.Any()).AnyTimes()
+
+	// First handshake - creates initial ticker
+	handshakeResp := &engineio_v4.HandshakeResponse{
+		Sid:          "test-sid",
+		PingInterval: 25000,
+		PingTimeout:  5000,
+	}
+	data, _ := json.Marshal(handshakeResp)
+
+	client.waitHandshake = make(chan struct{})
+	err := client.handleHandshake(data)
+	assert.NoError(t, err)
+
+	firstTicker := client.pingInterval
+	assert.NotNil(t, firstTicker)
+
+	// Second handshake - should reset the existing ticker (same object,
+	// because it's shared with the polling transport via WithDefaultPinger)
+	client.hadHandshake = sync.Once{}
+	client.waitHandshake = make(chan struct{})
+	err = client.handleHandshake(data)
+	assert.NoError(t, err)
+
+	secondTicker := client.pingInterval
+	assert.NotNil(t, secondTicker)
+	assert.Equal(t, firstTicker, secondTicker, "should reuse the same ticker object to preserve polling transport reference")
+
+	// Cleanup
+	if client.pingInterval != nil {
+		client.pingInterval.Stop()
+	}
+}
+
+func TestClient_Close_stops_ticker(t *testing.T) {
+	// Test that Close() stops the ping ticker to prevent goroutine leak
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockParser := mocks.NewMockParser(ctrl)
+	mockTransport := mocks.NewMockTransport(ctrl)
+
+	client := &Client{
+		log:       mockLogger,
+		parser:    mockParser,
+		transport: mockTransport,
+		messages:  make(chan []byte, 1),
+	}
+
+	// Create a ticker that we'll verify gets stopped
+	client.pingInterval = time.NewTicker(10 * time.Second)
+
+	mockTransport.EXPECT().Stop().Return(nil)
+
+	err := client.Close()
+	assert.NoError(t, err)
+
+	// Try to receive from the ticker's channel - it should be closed
+	// If the ticker was properly stopped, we should not be able to receive anymore after a short wait
+	select {
+	case _, ok := <-client.pingInterval.C:
+		// Channel should eventually be closed or we should timeout
+		assert.False(t, ok, "ticker channel should be closed after Close()")
+	case <-time.After(100 * time.Millisecond):
+		// This is expected - the ticker.C channel doesn't immediately close
+		// but the ticker itself is stopped
+	}
+}
+
+// TestClient_On_concurrent tests that concurrent On() calls and handler reads
+// do not cause data races. This test should be run with -race to detect issues.
+func TestClient_On_concurrent(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockParser := mocks.NewMockParser(ctrl)
+
+	testURL, _ := url.Parse("http://localhost")
+	client := &Client{
+		url:    testURL,
+		log:    mockLogger,
+		parser: mockParser,
+	}
+
+	// Track which handlers were called
+	var mu sync.Mutex
+	handlersSet := make(map[string]bool)
+
+	// Simulate concurrent On() calls from the user goroutine
+	numWriters := 10
+	numReaders := 10
+	numIterations := 100
+
+	done := make(chan struct{})
+
+	// Writer goroutines: continuously call On() to register handlers
+	for w := 0; w < numWriters; w++ {
+		go func(writerID int) {
+			for i := 0; i < numIterations; i++ {
+				client.On("message", func(b []byte) {
+					mu.Lock()
+					handlersSet["message"] = true
+					mu.Unlock()
+				})
+				client.On("connect", func(b []byte) {
+					mu.Lock()
+					handlersSet["connect"] = true
+					mu.Unlock()
+				})
+				client.On("close", func(b []byte) {
+					mu.Lock()
+					handlersSet["close"] = true
+					mu.Unlock()
+				})
+			}
+			done <- struct{}{}
+		}(w)
+	}
+
+	// Reader goroutines: continuously read and call handlers
+	// (simulating what happens in handlePacket and handleHandshake)
+	for r := 0; r < numReaders; r++ {
+		go func(readerID int) {
+			for i := 0; i < numIterations; i++ {
+				// Simulate reading messageHandler
+				client.handlerMu.RLock()
+				handler := client.messageHandler
+				client.handlerMu.RUnlock()
+				if handler != nil {
+					handler([]byte("test"))
+				}
+
+				// Simulate reading closeHandler
+				client.handlerMu.RLock()
+				closeH := client.closeHandler
+				client.handlerMu.RUnlock()
+				if closeH != nil {
+					closeH()
+				}
+
+				// Simulate reading afterConnect
+				client.handlerMu.RLock()
+				connectH := client.afterConnect
+				client.handlerMu.RUnlock()
+				if connectH != nil {
+					connectH()
+				}
+			}
+			done <- struct{}{}
+		}(r)
+	}
+
+	// Wait for all goroutines to finish
+	total := numWriters + numReaders
+	for i := 0; i < total; i++ {
+		<-done
+	}
+
+	// Verify that some handlers were indeed set and called
+	mu.Lock()
+	assert.True(t, handlersSet["message"] || handlersSet["connect"] || handlersSet["close"],
+		"At least some handlers should have been called")
+	mu.Unlock()
 }

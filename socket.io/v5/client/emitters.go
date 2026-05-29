@@ -16,10 +16,15 @@ func (c *Client) Emit(event interface{}, args ...interface{}) error {
 func (n *namespace) Emit(event interface{}, args ...interface{}) error {
 
 	if n.waitConnected != nil {
+		// Snapshot ctx under lock to prevent data race
+		n.client.mutex.RLock()
+		ctx := n.client.ctx
+		n.client.mutex.RUnlock()
+
 		select {
 		case <-n.waitConnected:
-		case <-n.client.ctx.Done():
-			return n.client.ctx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 
@@ -113,6 +118,11 @@ func (c *Client) sendPacketWithAckTimeout(
 	c.mutex.Unlock()
 
 	if timeout != nil {
+		// Snapshot ctx under lock to prevent data race
+		c.mutex.RLock()
+		ctx := c.ctx
+		c.mutex.RUnlock()
+
 		go func(done chan []interface{}) {
 			select {
 			case <-c.timer.After(*timeout):
@@ -123,8 +133,8 @@ func (c *Client) sendPacketWithAckTimeout(
 				if timeoutCallback != nil {
 					timeoutCallback()
 				}
-			case <-c.ctx.Done():
-				c.logger.Warnf("context is done: %v", c.ctx.Err())
+			case <-ctx.Done():
+				c.logger.Warnf("context is done: %v", ctx.Err())
 			case param := <-done:
 				if wrappedCallback != nil {
 					wrappedCallback(param)
