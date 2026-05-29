@@ -10,11 +10,17 @@ import (
 
 type EngineTransportOption func(*Transport) error
 
+// defaultHTTPTimeout bounds the full lifecycle (dial + TLS + headers + body)
+// of a polling request. Without it, the default http.Client has no timeout and
+// a poll can hang indefinitely on an unstable network, stalling the transport
+// goroutine. Override with WithHTTPClient for custom needs.
+const defaultHTTPTimeout = 30 * time.Second
+
 func NewTransport(options ...EngineTransportOption) (*Transport, error) {
 	// Create default client
 	client := &Transport{
 		log:            &utils.DefaultLogger{},
-		httpClient:     &http.Client{},
+		httpClient:     &http.Client{Timeout: defaultHTTPTimeout},
 		pinger:         time.NewTicker(10 * time.Second),
 		stopPooling:    make(chan struct{}, 1),
 		stopCh:         make(chan struct{}),
