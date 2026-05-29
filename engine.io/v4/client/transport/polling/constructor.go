@@ -13,11 +13,12 @@ type EngineTransportOption func(*Transport) error
 func NewTransport(options ...EngineTransportOption) (*Transport, error) {
 	// Create default client
 	client := &Transport{
-		log:             &utils.DefaultLogger{},
-		httpClient:      &http.Client{},
-		pinger:          time.NewTicker(10 * time.Second),
-		stopPooling:     make(chan struct{}, 1),
-		maxPayloadSize:  4 * 1024 * 1024, // 4MB default, matches socket.io JS maxHttpBufferSize
+		log:            &utils.DefaultLogger{},
+		httpClient:     &http.Client{},
+		pinger:         time.NewTicker(10 * time.Second),
+		stopPooling:    make(chan struct{}, 1),
+		stopCh:         make(chan struct{}),
+		maxPayloadSize: 4 * 1024 * 1024, // 4MB default, matches socket.io JS maxHttpBufferSize
 	}
 
 	// Apply options

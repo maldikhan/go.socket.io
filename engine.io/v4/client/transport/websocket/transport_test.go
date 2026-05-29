@@ -452,6 +452,135 @@ func TestTransport_wsReadLoop(t *testing.T) {
 	})
 }
 
+// TestTransport_wsReadLoop_FullChannel verifies that wsReadLoop does not block
+// forever when the messages channel is full. When ctx is cancelled or a stop
+// signal arrives, the loop must exit via the inner select, not spin forever.
+//
+// The barrier used here is the "receiveWs: %s" log message, which is emitted
+// inside case C of the outer select, immediately before the inner select.
+// Because it is the only 2-argument Debugf call in wsReadLoop, it can be
+// intercepted without ordering ambiguity. Cancelling/stopping only after this
+// barrier guarantees the test actually exercises the inner select's exit path.
+func TestTransport_wsReadLoop_FullChannel(t *testing.T) {
+	t.Parallel()
+
+	t.Run("context cancelled while messages channel is full", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+		mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// receiveWsLogged fires when "receiveWs: %s" is logged — the exact point
+		// between the outer select's case C and the inner select. Only then is
+		// the goroutine guaranteed to be blocked on c.messages <- message inside
+		// the inner select.
+		receiveWsLogged := make(chan struct{})
+
+		// Unbuffered messages channel ensures the inner select blocks.
+		messages := make(chan []byte)
+		onClose := make(chan error, 1)
+		transport := &Transport{
+			log:         mockLogger,
+			ws:          mockWS,
+			ctx:         ctx,
+			messages:    messages,
+			onClose:     onClose,
+			stopPooling: make(chan struct{}, 1),
+		}
+
+		// "receiveWs: %s" is the only 2-arg Debugf in wsReadLoop; intercept it
+		// specifically to avoid any ordering ambiguity with AnyTimes().
+		mockLogger.EXPECT().Debugf("receiveWs: %s", gomock.Any()).DoAndReturn(
+			func(format string, v ...any) { close(receiveWsLogged) },
+		).Times(1)
+		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+
+		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(msg *[]byte) error {
+			*msg = []byte("msg")
+			return nil
+		}).Times(1)
+		// A background goroutine may still be in Receive after the loop exits.
+		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(msg *[]byte) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}).AnyTimes()
+		mockWS.EXPECT().Close().Return(nil).AnyTimes()
+
+		go func() {
+			_ = transport.wsReadLoop()
+		}()
+
+		// Wait until we are inside case C, right before the inner select.
+		<-receiveWsLogged
+		cancel()
+
+		select {
+		case err := <-onClose:
+			assert.ErrorIs(t, err, context.Canceled)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("wsReadLoop blocked indefinitely when messages channel was full and context was cancelled")
+		}
+	})
+
+	t.Run("stop signal while messages channel is full", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+		mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+		ctx := context.Background()
+
+		receiveWsLogged := make(chan struct{})
+
+		messages := make(chan []byte)
+		onClose := make(chan error, 1)
+		stopPooling := make(chan struct{}, 1)
+		transport := &Transport{
+			log:         mockLogger,
+			ws:          mockWS,
+			ctx:         ctx,
+			messages:    messages,
+			onClose:     onClose,
+			stopPooling: stopPooling,
+		}
+
+		mockLogger.EXPECT().Debugf("receiveWs: %s", gomock.Any()).DoAndReturn(
+			func(format string, v ...any) { close(receiveWsLogged) },
+		).Times(1)
+		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+
+		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(msg *[]byte) error {
+			*msg = []byte("msg")
+			return nil
+		}).Times(1)
+		mockWS.EXPECT().Close().Return(nil).AnyTimes()
+
+		go func() {
+			_ = transport.wsReadLoop()
+		}()
+
+		// Wait until we are inside case C, right before the inner select.
+		<-receiveWsLogged
+		stopPooling <- struct{}{}
+
+		select {
+		case err := <-onClose:
+			assert.NoError(t, err)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("wsReadLoop blocked indefinitely when messages channel was full and stop was signalled")
+		}
+	})
+}
+
 func TestTransport_SendMessage(t *testing.T) {
 	t.Parallel()
 
