@@ -174,7 +174,13 @@ func (c *Client) handleHandshake(data []byte) error {
 
 	c.sid = handshakeResp.Sid
 	if handshakeResp.PingInterval != 0 {
-		c.pingInterval = time.NewTicker(time.Duration(handshakeResp.PingInterval) * time.Millisecond)
+		if c.pingInterval != nil {
+			// Reset reuses the existing ticker (shared with the polling transport),
+			// so we don't break the transport's pinger reference.
+			c.pingInterval.Reset(time.Duration(handshakeResp.PingInterval) * time.Millisecond)
+		} else {
+			c.pingInterval = time.NewTicker(time.Duration(handshakeResp.PingInterval) * time.Millisecond)
+		}
 	}
 
 	if handshakeResp.PingTimeout != 0 {
@@ -349,6 +355,11 @@ func (c *Client) Close() error {
 	t := c.transport
 	c.transport = nil
 	c.transportMu.Unlock()
+
+	// Stop the ping ticker to prevent goroutine leak
+	if c.pingInterval != nil {
+		c.pingInterval.Stop()
+	}
 
 	if t == nil {
 		return nil
