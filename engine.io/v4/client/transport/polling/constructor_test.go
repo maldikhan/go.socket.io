@@ -152,6 +152,20 @@ func TestNewTransport(t *testing.T) {
 	}
 }
 
+func TestNewTransport_DefaultHTTPTimeout(t *testing.T) {
+	got, err := NewTransport()
+	if err != nil {
+		t.Fatalf("NewTransport() returned an error: %v", err)
+	}
+	httpClient, ok := got.httpClient.(*http.Client)
+	if !ok {
+		t.Fatalf("NewTransport() httpClient is not *http.Client")
+	}
+	if httpClient.Timeout != defaultHTTPTimeout {
+		t.Errorf("NewTransport() default httpClient.Timeout = %v, want %v", httpClient.Timeout, defaultHTTPTimeout)
+	}
+}
+
 func TestWithLogger(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

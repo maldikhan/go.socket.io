@@ -41,6 +41,18 @@ func TestEngineIOV4Parser_Parse(t *testing.T) {
 			},
 			wantErr: nil,
 		},
+		{
+			name:    "Unknown packet type (above range)",
+			input:   []byte("9data"),
+			want:    nil,
+			wantErr: errors.New("unknown engine.io packet type: 0x39"),
+		},
+		{
+			name:    "Unknown packet type (below range)",
+			input:   []byte(" data"),
+			want:    nil,
+			wantErr: errors.New("unknown engine.io packet type: 0x20"),
+		},
 	}
 
 	for _, tt := range tests {
