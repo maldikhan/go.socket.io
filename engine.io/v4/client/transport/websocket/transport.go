@@ -119,9 +119,15 @@ func (c *Transport) connectWebSocket() error {
 func (c *Transport) wsReadLoop() error {
 	c.log.Debugf("run ws read loop")
 
-	// Make channels for messages and errors
-	messageCh := make(chan []byte)
-	errorCh := make(chan error)
+	// Buffered (size 1) so that a per-iteration reader goroutine still blocked
+	// in c.ws.Receive() when wsReadLoop returns can always complete its send
+	// and exit, instead of leaking. After wsReadLoop returns, connectWebSocket
+	// calls c.ws.Close(), which unblocks Receive() with an error; the goroutine
+	// then delivers that error into the buffer (no reader required) and exits.
+	// Only one reader goroutine is ever in flight at a time, so a capacity of 1
+	// is sufficient.
+	messageCh := make(chan []byte, 1)
+	errorCh := make(chan error, 1)
 	for {
 		// Run ws read in goroutine
 		go func() {
