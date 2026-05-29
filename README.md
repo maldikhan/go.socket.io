@@ -30,6 +30,7 @@ This library implements a zero side dependency client compatible with the Socket
   - [Emitting events](#emitting-events)
   - [Closing the connection](#closing-the-connection)
 - [Advanced Configuration](#advanced-configuration)
+- [Concurrency Model](#concurrency-model)
 - [Limitations](#limitations)
 - [Contributing](#contributing)
 - [License](#license)
@@ -308,6 +309,48 @@ err := client.Close()
 - `WithParser(Parser)`: Use a custom parser
 - `WithReconnectAttempts(int)`: Set the number of reconnect attempts
 - `WithReconnectWait(time.Duration)`: Set the wait time between reconnect attempts
+
+## Concurrency Model
+
+This section describes the threading guarantees of the client so you don't have
+to read the source to use it safely.
+
+### Goroutine-safe methods
+
+The following may be called concurrently from multiple goroutines:
+
+- `Connect(ctx)` — starts the session (call once per client lifecycle)
+- `Emit(...)` — safe to call from any goroutine, including from inside a handler
+- `On(...)` / `OnAny(...)` — handler registration is guarded by a mutex and may
+  race-free be called while the client is connected
+- `Close()` — safe to call from any goroutine
+
+### Callback execution
+
+- Each registered handler is invoked in **its own goroutine**, so a slow or
+  blocking handler does not stall the read loop or other handlers.
+- The `OnConnect` hook is likewise dispatched in a separate goroutine, so it may
+  call `Emit`/`Send` without deadlocking the transport upgrade.
+
+### Ordering
+
+- Packets within a namespace are **read and dispatched in receive order**.
+- Because each handler runs in its own goroutine, the *completion* order of
+  handlers is not guaranteed. If you need strict ordering inside a handler,
+  serialize the work yourself (e.g. push to a channel you drain sequentially).
+
+### Backpressure
+
+- The Engine.IO layer buffers up to **100 inbound messages** between the
+  transport and the dispatch loop. If consumers (your handlers) cannot keep up
+  and the buffer fills, the transport read blocks until space is available,
+  applying backpressure to the server rather than growing memory unbounded.
+
+### Panic handling
+
+- A panic inside an event handler is **recovered and logged**
+  (`panic in event handler: ...`) by the dispatcher. One misbehaving handler
+  will not crash the client or take down other handlers.
 
 ## Limitations
 
