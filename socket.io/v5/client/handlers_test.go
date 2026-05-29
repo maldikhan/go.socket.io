@@ -149,6 +149,32 @@ func TestClientOnMessage(t *testing.T) {
 		client.onMessage([]byte("valid data"))
 	})
 
+	t.Run("PacketAck with nil AckId", func(t *testing.T) {
+		msg := &socketio_v5.Message{
+			Type:  socketio_v5.PacketAck,
+			Event: &socketio_v5.Event{},
+			AckId: nil,
+		}
+
+		mockParser.EXPECT().Parse(gomock.Any()).Return(msg, nil)
+		mockLogger.EXPECT().Errorf("received ACK packet without ack ID, dropping").Times(1)
+
+		client.onMessage([]byte("valid data"))
+	})
+
+	t.Run("PacketAck with nil Event", func(t *testing.T) {
+		msg := &socketio_v5.Message{
+			Type:  socketio_v5.PacketAck,
+			Event: nil,
+			AckId: new(int),
+		}
+
+		mockParser.EXPECT().Parse(gomock.Any()).Return(msg, nil)
+		mockLogger.EXPECT().Errorf("received ACK packet without event data, dropping").Times(1)
+
+		client.onMessage([]byte("valid data"))
+	})
+
 	t.Run("PacketConnectError", func(t *testing.T) {
 		errorMsg := "connection error"
 		msg := &socketio_v5.Message{
@@ -224,6 +250,70 @@ func TestClientOnMessage(t *testing.T) {
 		// Verify namespace was created
 		assert.NotNil(t, client.namespaces["custom"])
 	})
+}
+
+// TestOnMessage_NamespaceLock verifies that onMessage holds c.mutex while reading
+// c.namespaces, preventing a data race with concurrent namespace() calls.
+// Run with -race to detect any violation.
+func TestOnMessage_NamespaceLock(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockParser := mocks.NewMockParser(ctrl)
+	mockLogger := mocks.NewMockLogger(ctrl)
+
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Infof(gomock.Any(), gomock.Any()).AnyTimes()
+
+	ns := &namespace{handlers: make(map[string][]func([]interface{}))}
+
+	client := &Client{
+		parser:     mockParser,
+		logger:     mockLogger,
+		namespaces: map[string]*namespace{"/": ns},
+	}
+
+	// onMessage reads c.namespaces under c.mutex.RLock (the fix).
+	// namespace() writes c.namespaces under c.mutex.Lock.
+	// Running them concurrently must not trigger the race detector.
+
+	msg := &socketio_v5.Message{
+		NS:    "/",
+		Type:  socketio_v5.PacketEvent,
+		Event: &socketio_v5.Event{Name: "evt"},
+	}
+	mockParser.EXPECT().Parse(gomock.Any()).Return(msg, nil).AnyTimes()
+
+	var wg sync.WaitGroup
+	const iterations = 50
+
+	wg.Add(iterations)
+	for i := 0; i < iterations; i++ {
+		go func() {
+			defer wg.Done()
+			client.onMessage([]byte("data"))
+		}()
+	}
+
+	wg.Add(iterations)
+	for i := 0; i < iterations; i++ {
+		go func() {
+			defer wg.Done()
+			client.namespace("/extra")
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent onMessage + namespace() timed out")
+	}
 }
 
 func TestClientHandleEvent(t *testing.T) {
@@ -441,5 +531,90 @@ func TestClientHandleAck(t *testing.T) {
 
 		assert.True(t, <-callbackCalled)
 		assert.Len(t, client.ackCallbacks, 0)
+	})
+}
+
+func TestSafeGoPanicRecovery(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+
+	client := &Client{
+		logger: mockLogger,
+	}
+
+	t.Run("Handler that panics is recovered", func(t *testing.T) {
+		panicMsg := "test panic"
+		handlerExecuted := make(chan bool)
+
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).Do(func(format string, args ...interface{}) {
+			assert.Contains(t, format, "panic in event handler")
+			assert.Contains(t, args[0], panicMsg)
+			handlerExecuted <- true
+		})
+
+		client.safeGo(func() {
+			panic(panicMsg)
+		})
+
+		select {
+		case <-handlerExecuted:
+		case <-time.After(100 * time.Millisecond):
+			t.Error("panic recovery should have logged error")
+		}
+	})
+
+	t.Run("Handler that completes normally works fine", func(t *testing.T) {
+		handlerExecuted := make(chan bool)
+
+		client.safeGo(func() {
+			handlerExecuted <- true
+		})
+
+		select {
+		case <-handlerExecuted:
+		case <-time.After(100 * time.Millisecond):
+			t.Error("handler should have executed")
+		}
+	})
+
+	t.Run("handleEvent with panicking handler recovers gracefully", func(t *testing.T) {
+		panicMsg := "event handler panic"
+		handlerExecuted := make(chan bool, 1)
+		normalHandlerExecuted := make(chan bool, 1)
+
+		mockLogger.EXPECT().Infof(gomock.Any(), gomock.Any()).AnyTimes()
+		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).Do(func(format string, args ...interface{}) {
+			assert.Contains(t, format, "panic in event handler")
+			handlerExecuted <- true
+		})
+
+		ns := &namespace{
+			handlers: make(map[string][]func([]interface{})),
+		}
+
+		ns.handlers["test_event"] = []func([]interface{}){
+			func(args []interface{}) {
+				panic(panicMsg)
+			},
+			func(args []interface{}) {
+				normalHandlerExecuted <- true
+			},
+		}
+
+		client.handleEvent(ns, &socketio_v5.Event{Name: "test_event"})
+
+		select {
+		case <-handlerExecuted:
+		case <-time.After(100 * time.Millisecond):
+			t.Error("panicking handler should have been recovered")
+		}
+
+		select {
+		case <-normalHandlerExecuted:
+		case <-time.After(100 * time.Millisecond):
+			t.Error("second handler should have executed despite first panicking")
+		}
 	})
 }

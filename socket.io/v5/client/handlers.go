@@ -33,8 +33,21 @@ func (c *Client) onMessage(data []byte) {
 		return
 	}
 
-	// Handle ACK packets first — they don't depend on namespace
+	// Handle ACK packets first — they don't carry a meaningful namespace,
+	// so they must not be dropped by the unknown-namespace guard below.
 	if msg.Type == socketio_v5.PacketAck {
+		if msg.AckId == nil {
+			c.logger.Errorf("received ACK packet without ack ID, dropping")
+			return
+		}
+		if msg.Event == nil {
+			c.logger.Errorf("received ACK packet without event data, dropping")
+			// Clean up the callback to prevent memory leak
+			c.mutex.Lock()
+			delete(c.ackCallbacks, *msg.AckId)
+			c.mutex.Unlock()
+			return
+		}
 		c.handleAck(msg.Event, *msg.AckId)
 		return
 	}
@@ -82,7 +95,8 @@ func (c *Client) handleConnectError(ns *namespace, payload interface{}) {
 	}
 
 	for _, handler := range handlers {
-		go handler([]interface{}{payload})
+		h := handler
+		c.safeGo(func() { h([]interface{}{payload}) })
 	}
 }
 
@@ -99,7 +113,8 @@ func (c *Client) handleDisconnect(ns *namespace, payload interface{}) {
 	}
 
 	for _, handler := range handlers {
-		go handler([]interface{}{payload})
+		h := handler
+		c.safeGo(func() { h([]interface{}{payload}) })
 	}
 }
 
@@ -121,7 +136,8 @@ func (c *Client) handleConnect(ns *namespace, payload interface{}) {
 	}
 
 	for _, handler := range handlers {
-		go handler([]interface{}{payload})
+		h := handler
+		c.safeGo(func() { h([]interface{}{payload}) })
 	}
 }
 
@@ -137,11 +153,13 @@ func (c *Client) handleEvent(ns *namespace, event *socketio_v5.Event) {
 	}
 
 	for _, handler := range anyHandlers {
-		go handler(event.Name, event.Payloads)
+		h := handler
+		c.safeGo(func() { h(event.Name, event.Payloads) })
 	}
 
 	for _, handler := range handlers {
-		go handler(event.Payloads)
+		h := handler
+		c.safeGo(func() { h(event.Payloads) })
 	}
 }
 
@@ -156,5 +174,5 @@ func (c *Client) handleAck(event *socketio_v5.Event, ackId int) {
 		return
 	}
 
-	go callback(event.Payloads)
+	c.safeGo(func() { callback(event.Payloads) })
 }

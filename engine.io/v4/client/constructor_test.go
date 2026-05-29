@@ -32,6 +32,7 @@ func TestNewClientEdges(t *testing.T) {
 	t.Run("Empty parser", func(t *testing.T) {
 		_, err := NewClient(WithRawURL("http://example.com"), WithParser(nil))
 		assert.Error(t, err)
+		assert.Equal(t, "parser is nil", err.Error())
 	})
 
 	t.Run("Transport fallback", func(t *testing.T) {

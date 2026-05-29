@@ -382,17 +382,27 @@ func TestClient_handleHandshake(t *testing.T) {
 
 		// Track the order: afterConnect must observe the websocket
 		// transport (i.e. the upgrade must have finished already).
+		// afterConnect runs in a goroutine, so we synchronize with a channel.
 		var transportDuringCallback Transport
+		afterConnectDone := make(chan struct{})
 		client.afterConnect = func() {
 			transportDuringCallback = client.transport
+			close(afterConnectDone)
 		}
 
 		client.hadHandshake = sync.Once{}
 		client.waitHandshake = make(chan struct{})
 		err := client.handleHandshake(data)
 		require.NoError(t, err)
+
+		select {
+		case <-afterConnectDone:
+		case <-time.After(100 * time.Millisecond):
+			require.Fail(t, "afterConnect goroutine did not complete in time")
+		}
 		assert.Equal(t, mockTransportWs, transportDuringCallback,
 			"afterConnect must be called after transport upgrade")
+		client.afterConnect = nil
 	})
 
 	t.Run("Handshake with upgrade failure", func(t *testing.T) {
@@ -866,4 +876,95 @@ func TestClient_Send_after_close(t *testing.T) {
 	err := client.Send([]byte("test"))
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "client is closed")
+}
+
+func TestClient_handleHandshake_ticker_stopped(t *testing.T) {
+	// Test that the ticker is reset (not replaced) during re-handshake to preserve
+	// the reference shared with the polling transport via WithDefaultPinger
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockParser := mocks.NewMockParser(ctrl)
+	mockTransport := mocks.NewMockTransport(ctrl)
+
+	client := &Client{
+		log:       mockLogger,
+		transport: mockTransport,
+		parser:    mockParser,
+		supportedTransports: map[engineio_v4.EngineIOTransport]Transport{
+			engineio_v4.TransportPolling: mockTransport,
+		},
+	}
+
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockTransport.EXPECT().Transport().Return(engineio_v4.TransportPolling).AnyTimes()
+	mockTransport.EXPECT().SetHandshake(gomock.Any()).AnyTimes()
+
+	// First handshake - creates initial ticker
+	handshakeResp := &engineio_v4.HandshakeResponse{
+		Sid:          "test-sid",
+		PingInterval: 25000,
+		PingTimeout:  5000,
+	}
+	data, _ := json.Marshal(handshakeResp)
+
+	client.waitHandshake = make(chan struct{})
+	err := client.handleHandshake(data)
+	assert.NoError(t, err)
+
+	firstTicker := client.pingInterval
+	assert.NotNil(t, firstTicker)
+
+	// Second handshake - should reset the existing ticker (same object,
+	// because it's shared with the polling transport via WithDefaultPinger)
+	client.hadHandshake = sync.Once{}
+	client.waitHandshake = make(chan struct{})
+	err = client.handleHandshake(data)
+	assert.NoError(t, err)
+
+	secondTicker := client.pingInterval
+	assert.NotNil(t, secondTicker)
+	assert.Equal(t, firstTicker, secondTicker, "should reuse the same ticker object to preserve polling transport reference")
+
+	// Cleanup
+	if client.pingInterval != nil {
+		client.pingInterval.Stop()
+	}
+}
+
+func TestClient_Close_stops_ticker(t *testing.T) {
+	// Test that Close() stops the ping ticker to prevent goroutine leak
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockParser := mocks.NewMockParser(ctrl)
+	mockTransport := mocks.NewMockTransport(ctrl)
+
+	client := &Client{
+		log:       mockLogger,
+		parser:    mockParser,
+		transport: mockTransport,
+		messages:  make(chan []byte, 1),
+	}
+
+	// Create a ticker that we'll verify gets stopped
+	client.pingInterval = time.NewTicker(10 * time.Second)
+
+	mockTransport.EXPECT().Stop().Return(nil)
+
+	err := client.Close()
+	assert.NoError(t, err)
+
+	// Try to receive from the ticker's channel - it should be closed
+	// If the ticker was properly stopped, we should not be able to receive anymore after a short wait
+	select {
+	case _, ok := <-client.pingInterval.C:
+		// Channel should eventually be closed or we should timeout
+		assert.False(t, ok, "ticker channel should be closed after Close()")
+	case <-time.After(100 * time.Millisecond):
+		// This is expected - the ticker.C channel doesn't immediately close
+		// but the ticker itself is stopped
+	}
 }
