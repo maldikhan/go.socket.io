@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -1234,4 +1235,44 @@ func TestTransport_SendMessage_Error(t *testing.T) {
 	err := transport.SendMessage([]byte("test message"))
 	assert.Error(t, err)
 	assert.Equal(t, "send error", err.Error())
+}
+
+func TestConcurrentSetHandshakeAndBuildUrl(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+	mockLogger.EXPECT().Errorf(gomock.Any()).AnyTimes()
+
+	transport := &Transport{
+		log: mockLogger,
+		url: &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+	}
+
+	var wg sync.WaitGroup
+
+	// Run SetHandshake and buildWsUrl concurrently
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(iter int) {
+			defer wg.Done()
+			handshake := &engineio_v4.HandshakeResponse{
+				Sid: "sid-" + string(rune(iter)),
+			}
+			transport.SetHandshake(handshake)
+		}(i)
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			url := transport.buildWsUrl()
+			assert.NotNil(t, url)
+		}()
+	}
+
+	wg.Wait()
+
+	// If there was a race condition, the race detector would catch it
 }

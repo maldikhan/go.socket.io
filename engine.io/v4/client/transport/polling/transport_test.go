@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1102,4 +1103,47 @@ func TestRun_stopped_flag_reset(t *testing.T) {
 			t.Fatal("Timeout waiting for second onClose signal")
 		}
 	})
+}
+
+func TestConcurrentSetHandshakeAndBuildUrl(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Errorf(gomock.Any()).AnyTimes()
+
+	client := &Transport{
+		log:    mockLogger,
+		pinger: time.NewTicker(time.Minute),
+		url:    &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+	}
+
+	var wg sync.WaitGroup
+
+	// Run SetHandshake and buildHttpUrl concurrently
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(iter int) {
+			defer wg.Done()
+			handshake := &engineio_v4.HandshakeResponse{
+				Sid:          "sid-" + string(rune(iter)),
+				PingInterval: 5000,
+			}
+			client.SetHandshake(handshake)
+		}(i)
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			url := client.buildHttpUrl()
+			assert.NotNil(t, url)
+		}()
+	}
+
+	wg.Wait()
+
+	// If there was a race condition, the race detector would catch it
 }

@@ -46,10 +46,16 @@ type Transport struct {
 
 	stopped        uint32 // atomic; 0 = running, 1 = stopped
 	maxPayloadSize int64
+
+	// mu guards the sid field, which is written by SetHandshake()/Run() and
+	// read by buildHttpUrl() from the polling goroutine.
+	mu sync.RWMutex
 }
 
 func (c *Transport) SetHandshake(handshake *engineio_v4.HandshakeResponse) {
+	c.mu.Lock()
 	c.sid = handshake.Sid
+	c.mu.Unlock()
 	pingInterval := 10 * time.Second
 	if handshake.PingInterval != 0 {
 		pingInterval = time.Duration(handshake.PingInterval) * time.Millisecond
@@ -83,7 +89,9 @@ func (c *Transport) Run(
 	onClose chan<- error,
 ) error {
 	c.ctx = ctx
+	c.mu.Lock()
 	c.sid = sid
+	c.mu.Unlock()
 	c.url = url
 	c.messages = messagesChan
 	c.onClose = onClose
@@ -170,6 +178,9 @@ func (c *Transport) pollingLoop() error {
 }
 
 func (c *Transport) buildHttpUrl() *url.URL {
+	c.mu.RLock()
+	sid := c.sid
+	c.mu.RUnlock()
 
 	reqURL := &url.URL{
 		Scheme: c.url.Scheme,
@@ -181,7 +192,7 @@ func (c *Transport) buildHttpUrl() *url.URL {
 
 	query.Set("transport", "polling")
 	query.Set("EIO", "4")
-	query.Set("sid", c.sid)
+	query.Set("sid", sid)
 
 	reqURL.RawQuery = query.Encode()
 	return reqURL
