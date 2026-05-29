@@ -45,6 +45,18 @@ func (c *Client) onMessage(data []byte) {
 	case socketio_v5.PacketEvent:
 		c.handleEvent(ns, msg.Event)
 	case socketio_v5.PacketAck:
+		if msg.AckId == nil {
+			c.logger.Errorf("received ACK packet without ack ID, dropping")
+			return
+		}
+		if msg.Event == nil {
+			c.logger.Errorf("received ACK packet without event data, dropping")
+			// Clean up the callback to prevent memory leak
+			c.mutex.Lock()
+			delete(c.ackCallbacks, *msg.AckId)
+			c.mutex.Unlock()
+			return
+		}
 		c.handleAck(msg.Event, *msg.AckId)
 	case socketio_v5.PacketConnectError:
 		c.handleConnectError(ns, msg.Payload)

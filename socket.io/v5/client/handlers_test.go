@@ -149,6 +149,32 @@ func TestClientOnMessage(t *testing.T) {
 		client.onMessage([]byte("valid data"))
 	})
 
+	t.Run("PacketAck with nil AckId", func(t *testing.T) {
+		msg := &socketio_v5.Message{
+			Type:  socketio_v5.PacketAck,
+			Event: &socketio_v5.Event{},
+			AckId: nil,
+		}
+
+		mockParser.EXPECT().Parse(gomock.Any()).Return(msg, nil)
+		mockLogger.EXPECT().Errorf("received ACK packet without ack ID, dropping").Times(1)
+
+		client.onMessage([]byte("valid data"))
+	})
+
+	t.Run("PacketAck with nil Event", func(t *testing.T) {
+		msg := &socketio_v5.Message{
+			Type:  socketio_v5.PacketAck,
+			Event: nil,
+			AckId: new(int),
+		}
+
+		mockParser.EXPECT().Parse(gomock.Any()).Return(msg, nil)
+		mockLogger.EXPECT().Errorf("received ACK packet without event data, dropping").Times(1)
+
+		client.onMessage([]byte("valid data"))
+	})
+
 	t.Run("PacketConnectError", func(t *testing.T) {
 		errorMsg := "connection error"
 		msg := &socketio_v5.Message{
