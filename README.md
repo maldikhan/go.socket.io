@@ -327,20 +327,26 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 <table>
 <tr>
     <td align="center">
-        <a href="https://github.com/maldikhan">
-            <img src="https://avatars.githubusercontent.com/u/1918932?v=4" width="80;" alt="maldikhan"/>
+        <a href="https://github.com/MobDev-Hobby">
+            <img src="https://avatars.githubusercontent.com/u/1918932?v=4" width="80;" alt="MobDev-Hobby"/>
             <br />
-            <sub><b>maldikhan</b></sub>
+            <sub><b>Andrew Khodzhakhanov</b></sub>
+        </a>
+    </td>
+    <td align="center">
+        <a href="https://github.com/claude">
+            <img src="https://avatars.githubusercontent.com/u/81847?v=4" width="80;" alt="claude"/>
+            <br />
+            <sub><b>Claude</b></sub>
         </a>
     </td>
     <td align="center">
         <a href="https://github.com/breml">
             <img src="https://avatars.githubusercontent.com/u/6205217?v=4" width="80;" alt="breml"/>
             <br />
-            <sub><b>breml</b></sub>
+            <sub><b>Breml</b></sub>
         </a>
-    </td>
-</tr>
+    </td></tr>
 </table>
 <!-- readme: contributors -end -->
 
