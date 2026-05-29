@@ -44,7 +44,8 @@ type Transport struct {
 	stopCh   chan struct{}
 	stopOnce sync.Once
 
-	stopped uint32 // atomic; 0 = running, 1 = stopped
+	stopped        uint32 // atomic; 0 = running, 1 = stopped
+	maxPayloadSize int64
 }
 
 func (c *Transport) SetHandshake(handshake *engineio_v4.HandshakeResponse) {
@@ -196,10 +197,29 @@ func (c *Transport) poll() error {
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(resp.Body)
+	// Limit payload size to guard against OOM from a malicious/buggy server.
+	// maxPayloadSize <= 0 means unlimited (e.g. a Transport built directly
+	// without the constructor default of 4MB).
+	var reader io.Reader = resp.Body
+	if c.maxPayloadSize > 0 {
+		// Read one byte more than the limit to detect oversized payloads.
+		// Guard against int64 overflow when maxPayloadSize is near math.MaxInt64.
+		readLimit := c.maxPayloadSize + 1
+		if readLimit <= 0 {
+			readLimit = c.maxPayloadSize // overflow: clamp to maxPayloadSize
+		}
+		reader = io.LimitReader(resp.Body, readLimit)
+	}
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return err
 	}
+
+	// Check if payload exceeds the maximum size.
+	if c.maxPayloadSize > 0 && int64(len(body)) > c.maxPayloadSize {
+		return fmt.Errorf("inbound payload size %d exceeds maximum allowed %d", len(body), c.maxPayloadSize)
+	}
+
 	c.log.Debugf("receiveHttp: %s", string(body))
 
 	select {

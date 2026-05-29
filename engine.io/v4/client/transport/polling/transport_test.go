@@ -808,7 +808,7 @@ func TestSendMessage(t *testing.T) {
 		// Track if the body was closed
 		bodyClosed := false
 		mockBody := &closeTrackingBody{
-			reader:      strings.NewReader("response data"),
+			reader:    strings.NewReader("response data"),
 			onCloseFn: func() { bodyClosed = true },
 		}
 
@@ -852,4 +852,162 @@ func (c *closeTrackingBody) Close() error {
 		c.onCloseFn()
 	}
 	return nil
+}
+
+func TestPollOversizedPayload(t *testing.T) {
+	t.Run("Payload exceeds max size", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		messagesChan := make(chan []byte, 1)
+		maxPayloadSize := int64(100)
+		oversizedBody := strings.Repeat("x", 101)
+
+		client := &Transport{
+			log:            mockLogger,
+			httpClient:     mockHTTPClient,
+			url:            &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:            "test-sid",
+			ctx:            ctx,
+			messages:       messagesChan,
+			maxPayloadSize: maxPayloadSize,
+		}
+
+		mockLogger.EXPECT().Debugf("run polling")
+
+		mockResp := &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(oversizedBody)),
+		}
+
+		mockHTTPClient.EXPECT().
+			Do(gomock.Any()).
+			DoAndReturn(func(req *http.Request) (*http.Response, error) {
+				return mockResp, nil
+			})
+
+		err := client.poll()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "inbound payload size")
+		assert.Contains(t, err.Error(), "exceeds maximum allowed")
+
+		// Ensure no message was sent
+		assert.Equal(t, 0, len(messagesChan), "Expected no message to be sent for oversized payload")
+	})
+
+	t.Run("Payload within max size", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		messagesChan := make(chan []byte, 1)
+		maxPayloadSize := int64(100)
+		validBody := strings.Repeat("x", 50)
+
+		client := &Transport{
+			log:            mockLogger,
+			httpClient:     mockHTTPClient,
+			url:            &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:            "test-sid",
+			ctx:            ctx,
+			messages:       messagesChan,
+			maxPayloadSize: maxPayloadSize,
+		}
+
+		mockLogger.EXPECT().Debugf("run polling")
+		mockLogger.EXPECT().Debugf("receiveHttp: %s", validBody)
+
+		mockResp := &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(validBody)),
+		}
+
+		mockHTTPClient.EXPECT().
+			Do(gomock.Any()).
+			DoAndReturn(func(req *http.Request) (*http.Response, error) {
+				return mockResp, nil
+			})
+
+		done := make(chan struct{})
+		go func() {
+			err := client.poll()
+			assert.NoError(t, err)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			assert.Equal(t, 1, len(messagesChan), "Expected one message to be sent")
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for poll to complete")
+		}
+	})
+
+	t.Run("Payload limit overflow guard", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		messagesChan := make(chan []byte, 1)
+		// Set maxPayloadSize to a value that would overflow when incremented
+		maxPayloadSize := int64(9223372036854775807) // math.MaxInt64
+
+		client := &Transport{
+			log:            mockLogger,
+			httpClient:     mockHTTPClient,
+			url:            &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:            "test-sid",
+			ctx:            ctx,
+			messages:       messagesChan,
+			maxPayloadSize: maxPayloadSize,
+		}
+
+		mockLogger.EXPECT().Debugf("run polling")
+		mockLogger.EXPECT().Debugf("receiveHttp: %s", "test")
+
+		mockResp := &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader("test")),
+		}
+
+		mockHTTPClient.EXPECT().
+			Do(gomock.Any()).
+			DoAndReturn(func(req *http.Request) (*http.Response, error) {
+				return mockResp, nil
+			})
+
+		done := make(chan struct{})
+		go func() {
+			err := client.poll()
+			// Should succeed because "test" (4 bytes) is within MaxInt64
+			assert.NoError(t, err)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			assert.Equal(t, 1, len(messagesChan), "Expected one message to be sent")
+		case <-time.After(time.Second):
+			t.Fatal("Timeout waiting for poll to complete")
+		}
+	})
 }
