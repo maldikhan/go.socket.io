@@ -1,0 +1,13 @@
+{
+  "name": "go-socketio-e2e-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Socket.IO 4.x server for go.socket.io end-to-end tests",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.0"
+  }
+}
