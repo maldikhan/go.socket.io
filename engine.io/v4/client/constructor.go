@@ -25,6 +25,7 @@ func NewClient(options ...EngineClientOption) (*Client, error) {
 		pingInterval:      time.NewTicker(10 * time.Second),
 		stopPooling:       make(chan struct{}, 1),
 		transportClosed:   make(chan error, 1),
+		redactPayload:     true, // production-safe default; WithDebugPayload(true) opts out
 	}
 
 	for _, opt := range options {
@@ -48,10 +49,12 @@ func NewClient(options ...EngineClientOption) (*Client, error) {
 	if len(client.supportedTransports) == 0 {
 		wsTransport, _ := engineio_v4_client_transport_ws.NewTransport(
 			engineio_v4_client_transport_ws.WithLogger(client.log),
+			engineio_v4_client_transport_ws.WithDebugPayload(!client.redactPayload),
 		)
 		pollingTransport, _ := engineio_v4_client_transport_polling.NewTransport(
 			engineio_v4_client_transport_polling.WithDefaultPinger(client.pingInterval),
 			engineio_v4_client_transport_polling.WithLogger(client.log),
+			engineio_v4_client_transport_polling.WithDebugPayload(!client.redactPayload),
 		)
 		if client.supportedTransports == nil {
 			client.supportedTransports = make(map[engineio_v4.EngineIOTransport]Transport)
@@ -148,6 +151,15 @@ func WithReconnectAttempts(attempts int) EngineClientOption {
 func WithReconnectWait(wait time.Duration) EngineClientOption {
 	return func(c *Client) error {
 		c.reconnectWait = wait
+		return nil
+	}
+}
+
+// WithDebugPayload enables logging of raw packet payloads at debug level.
+// It is disabled by default so production logs do not leak message contents.
+func WithDebugPayload(enabled bool) EngineClientOption {
+	return func(c *Client) error {
+		c.redactPayload = !enabled
 		return nil
 	}
 }

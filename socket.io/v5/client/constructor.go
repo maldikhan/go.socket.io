@@ -27,8 +27,9 @@ func NewClient(options ...ClientOption) (*Client, error) {
 			namespaces:    make(map[string]*namespace),
 			ackCallbacks:  make(map[int]func([]interface{})),
 
-			logger: &utils.DefaultLogger{},
-			timer:  &utils.DefaultTimer{},
+			logger:        &utils.DefaultLogger{},
+			timer:         &utils.DefaultTimer{},
+			redactPayload: true, // production-safe default; WithDebugPayload(true) opts out
 		},
 	}
 
@@ -60,6 +61,7 @@ func NewClient(options ...ClientOption) (*Client, error) {
 		engineioClient, err := engineio_v4_client.NewClient(
 			engineio_v4_client.WithURL(client.url),
 			engineio_v4_client.WithLogger(client.logger),
+			engineio_v4_client.WithDebugPayload(!client.redactPayload),
 		)
 		if err != nil {
 			return nil, err
@@ -134,6 +136,16 @@ func WithTimer(timer Timer) ClientOption {
 func WithParser(parser Parser) ClientOption {
 	return func(c *InitClient) error {
 		c.parser = parser
+		return nil
+	}
+}
+
+// WithDebugPayload enables logging of raw payloads at debug level across the
+// client and the default transports it builds. Disabled by default so
+// production logs do not leak message contents (tokens, PII).
+func WithDebugPayload(enabled bool) ClientOption {
+	return func(c *InitClient) error {
+		c.redactPayload = !enabled
 		return nil
 	}
 }

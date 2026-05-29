@@ -25,6 +25,7 @@ func NewTransport(options ...EngineTransportOption) (*Transport, error) {
 		stopPooling:    make(chan struct{}, 1),
 		stopCh:         make(chan struct{}),
 		maxPayloadSize: 4 * 1024 * 1024, // 4MB default, matches socket.io JS maxHttpBufferSize
+		redactPayload:  true,            // production-safe default; WithDebugPayload(true) opts out
 	}
 
 	// Apply options
@@ -77,6 +78,15 @@ func WithMaxPayloadSize(size int64) EngineTransportOption {
 			return errors.New("maxPayloadSize must be positive")
 		}
 		c.maxPayloadSize = size
+		return nil
+	}
+}
+
+// WithDebugPayload enables logging of raw payloads at debug level.
+// Disabled by default so production logs don't leak message contents.
+func WithDebugPayload(enabled bool) EngineTransportOption {
+	return func(c *Transport) error {
+		c.redactPayload = !enabled
 		return nil
 	}
 }

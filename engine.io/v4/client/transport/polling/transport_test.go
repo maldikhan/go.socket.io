@@ -723,7 +723,7 @@ func TestSendMessage(t *testing.T) {
 		ctx:        ctx,
 	}
 
-	mockLogger.EXPECT().Debugf("sendHttp: %s", []byte("test message")).Times(2)
+	mockLogger.EXPECT().Debugf("sendHttp: %s", "test message").Times(2)
 	mockLogger.EXPECT().Debugf("receiveHttp: %s", "200 OK")
 
 	mockResp := &http.Response{
@@ -771,7 +771,7 @@ func TestSendMessage(t *testing.T) {
 			ctx:        ctx,
 		}
 
-		mockLogger.EXPECT().Debugf("sendHttp: %s", []byte("test message"))
+		mockLogger.EXPECT().Debugf("sendHttp: %s", "test message")
 
 		expectedError := errors.New("network error")
 
@@ -803,7 +803,7 @@ func TestSendMessage(t *testing.T) {
 			ctx:        ctx,
 		}
 
-		mockLogger.EXPECT().Debugf("sendHttp: %s", []byte("test message"))
+		mockLogger.EXPECT().Debugf("sendHttp: %s", "test message")
 		mockLogger.EXPECT().Debugf("receiveHttp: %s", "200 OK")
 
 		// Track if the body was closed
@@ -1255,4 +1255,19 @@ func TestPollingLoop_StopDuringPoll(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("pollingLoop did not notify onClose on stop")
 	}
+}
+
+func TestTransport_payloadRedaction(t *testing.T) {
+	c := &Transport{redactPayload: true}
+	assert.Equal(t, "[redacted 5 bytes]", c.payload([]byte("hello")))
+	c.redactPayload = false
+	assert.Equal(t, "hello", c.payload([]byte("hello")))
+}
+
+func TestTransport_WithDebugPayload(t *testing.T) {
+	c := &Transport{}
+	assert.NoError(t, WithDebugPayload(true)(c))
+	assert.False(t, c.redactPayload)
+	assert.NoError(t, WithDebugPayload(false)(c))
+	assert.True(t, c.redactPayload)
 }

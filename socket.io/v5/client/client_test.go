@@ -315,3 +315,18 @@ func TestConcurrentSetHandshakeDataAndConnect(t *testing.T) {
 	<-done
 	<-done
 }
+
+func TestClient_payloadRedaction(t *testing.T) {
+	c := &Client{redactPayload: true}
+	assert.Equal(t, "[redacted 5 bytes]", c.payload([]byte("hello")))
+	c.redactPayload = false
+	assert.Equal(t, "hello", c.payload([]byte("hello")))
+}
+
+func TestClient_WithDebugPayload(t *testing.T) {
+	c := &InitClient{Client: &Client{}}
+	assert.NoError(t, WithDebugPayload(true)(c))
+	assert.False(t, c.redactPayload)
+	assert.NoError(t, WithDebugPayload(false)(c))
+	assert.True(t, c.redactPayload)
+}

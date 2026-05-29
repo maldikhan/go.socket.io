@@ -50,6 +50,18 @@ type Transport struct {
 	// mu guards the sid field, which is written by SetHandshake()/Run() and
 	// read by buildHttpUrl() from the polling goroutine.
 	mu sync.RWMutex
+
+	// redactPayload, when true, replaces raw payloads in debug logs with a
+	// size marker. Zero value is verbose; NewTransport sets the safe default.
+	redactPayload bool
+}
+
+// payload returns a size marker when redaction is enabled, or the raw data.
+func (c *Transport) payload(data []byte) string {
+	if c.redactPayload {
+		return fmt.Sprintf("[redacted %d bytes]", len(data))
+	}
+	return string(data)
 }
 
 func (c *Transport) SetHandshake(handshake *engineio_v4.HandshakeResponse) {
@@ -240,7 +252,7 @@ func (c *Transport) poll() error {
 		return fmt.Errorf("inbound payload size %d exceeds maximum allowed %d", len(body), c.maxPayloadSize)
 	}
 
-	c.log.Debugf("receiveHttp: %s", string(body))
+	c.log.Debugf("receiveHttp: %s", c.payload(body))
 
 	select {
 	case c.messages <- body:
@@ -257,7 +269,7 @@ func (c *Transport) poll() error {
 
 func (c *Transport) SendMessage(msg []byte) error {
 
-	c.log.Debugf("sendHttp: %s", msg)
+	c.log.Debugf("sendHttp: %s", c.payload(msg))
 	req, err := http.NewRequestWithContext(c.ctx, "POST", c.buildHttpUrl().String(), bytes.NewReader(msg))
 	if err != nil {
 		return fmt.Errorf("error creating request: %w", err)
