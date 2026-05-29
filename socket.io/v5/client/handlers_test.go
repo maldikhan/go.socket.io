@@ -215,6 +215,41 @@ func TestClientOnMessage(t *testing.T) {
 
 		client.onMessage([]byte("valid data"))
 	})
+
+	t.Run("Unknown namespace event should not crash", func(t *testing.T) {
+		// Clear namespaces to simulate unknown namespace
+		client.namespaces = make(map[string]*namespace)
+
+		msg := &socketio_v5.Message{
+			NS:    "unknown",
+			Type:  socketio_v5.PacketEvent,
+			Event: &socketio_v5.Event{Name: "test_event"},
+		}
+
+		mockParser.EXPECT().Parse(gomock.Any()).Return(msg, nil)
+		mockLogger.EXPECT().Warnf(gomock.Any(), gomock.Any(), gomock.Any())
+
+		// Should not panic and should log warning
+		client.onMessage([]byte("valid data"))
+	})
+
+	t.Run("PacketConnect for unknown namespace should auto-create", func(t *testing.T) {
+		// Clear namespaces to simulate unknown namespace
+		client.namespaces = make(map[string]*namespace)
+
+		msg := &socketio_v5.Message{
+			NS:   "custom",
+			Type: socketio_v5.PacketConnect,
+		}
+
+		mockParser.EXPECT().Parse(gomock.Any()).Return(msg, nil)
+
+		// Should not panic and should create namespace
+		client.onMessage([]byte("valid data"))
+
+		// Verify namespace was created
+		assert.NotNil(t, client.namespaces["custom"])
+	})
 }
 
 // TestOnMessage_NamespaceLock verifies that onMessage holds c.mutex while reading
