@@ -199,13 +199,13 @@ func TestConcurrentConnectAndEmit(t *testing.T) {
 	ctx := context.Background()
 
 	client := &Client{
-		engineio:         mockEngineIO,
-		parser:           mockParser,
-		logger:           mockLogger,
-		ctx:              ctx, // Initialize ctx
-		namespaces:       make(map[string]*namespace),
-		ackCallbacks:     make(map[int]func([]interface{})),
-		handshakeData:    make(map[string]interface{}),
+		engineio:      mockEngineIO,
+		parser:        mockParser,
+		logger:        mockLogger,
+		ctx:           ctx, // Initialize ctx
+		namespaces:    make(map[string]*namespace),
+		ackCallbacks:  make(map[int]func([]interface{})),
+		handshakeData: make(map[string]interface{}),
 	}
 
 	// Create default namespace with a pre-closed waitConnected channel
