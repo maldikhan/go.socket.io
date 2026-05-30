@@ -4,9 +4,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 
 	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
 )
+
+// maxBinaryWalkDepth bounds the reflective traversal performed by HasBinary and
+// the binary extractor so a cyclic structure (e.g. a struct that points back to
+// itself) can never cause an unbounded recursion / hang.
+const maxBinaryWalkDepth = 256
+
+// byteSliceType is the reflect.Type of []byte, the binary "leaf".
+var byteSliceType = reflect.TypeOf([]byte(nil))
 
 // ErrParseBinary is returned when binary attachments cannot be reconciled with
 // the placeholders found in a PacketBinaryEvent/PacketBinaryAck payload.
@@ -126,20 +136,77 @@ func (p *SocketIOV5DefaultParser) HasBinary(event *socketio_v5.Event) bool {
 }
 
 // valueHasBinary reports whether a payload value contains any []byte, searching
-// nested slices and maps so binary buffers placed inside structures are found.
+// nested slices, maps, structs and pointers so binary buffers placed inside
+// arbitrary Go structures are found. The traversal mirrors extractBinary so the
+// send decision and the actual extraction always agree.
 func valueHasBinary(value interface{}) bool {
-	switch v := value.(type) {
-	case []byte:
-		return true
-	case map[string]interface{}:
-		for _, item := range v {
-			if valueHasBinary(item) {
+	if value == nil {
+		return false
+	}
+	return reflectHasBinary(reflect.ValueOf(value), 0)
+}
+
+// reflectHasBinary walks an arbitrary reflect.Value looking for a []byte leaf.
+// It treats []byte itself as the binary leaf (never recursing into it as a slice
+// of bytes) and bounds recursion via depth to stay cycle-safe. Only exported
+// struct fields and fields not tagged json:"-" are considered, matching what
+// encoding/json (and therefore the extractor) can actually see.
+func reflectHasBinary(v reflect.Value, depth int) bool {
+	if depth > maxBinaryWalkDepth {
+		return false
+	}
+	if !v.IsValid() {
+		return false
+	}
+	switch v.Kind() {
+	case reflect.Interface:
+		if v.IsNil() {
+			return false
+		}
+		return reflectHasBinary(v.Elem(), depth+1)
+	case reflect.Ptr:
+		if v.IsNil() {
+			return false
+		}
+		return reflectHasBinary(v.Elem(), depth+1)
+	case reflect.Slice:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			// []byte (or a named type with []byte underlying) is the leaf.
+			return true
+		}
+		for i := 0; i < v.Len(); i++ {
+			if reflectHasBinary(v.Index(i), depth+1) {
 				return true
 			}
 		}
-	case []interface{}:
-		for _, item := range v {
-			if valueHasBinary(item) {
+	case reflect.Array:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			// A byte array is JSON-encoded as a number list, not as binary; it
+			// is not a binary attachment leaf, so do not recurse element-wise.
+			return false
+		}
+		for i := 0; i < v.Len(); i++ {
+			if reflectHasBinary(v.Index(i), depth+1) {
+				return true
+			}
+		}
+	case reflect.Map:
+		for _, key := range v.MapKeys() {
+			if reflectHasBinary(v.MapIndex(key), depth+1) {
+				return true
+			}
+		}
+	case reflect.Struct:
+		t := v.Type()
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			if field.PkgPath != "" { // unexported
+				continue
+			}
+			if jsonFieldName(field) == "-" {
+				continue
+			}
+			if reflectHasBinary(v.Field(i), depth+1) {
 				return true
 			}
 		}
@@ -147,16 +214,51 @@ func valueHasBinary(value interface{}) bool {
 	return false
 }
 
+// jsonFieldName returns the JSON object key encoding/json would use for the
+// struct field, honoring the `json:"name"` tag. It returns "-" when the field is
+// explicitly skipped (json:"-").
+func jsonFieldName(field reflect.StructField) string {
+	tag, ok := field.Tag.Lookup("json")
+	if !ok {
+		return field.Name
+	}
+	name := tag
+	if comma := strings.IndexByte(tag, ','); comma >= 0 {
+		name = tag[:comma]
+	}
+	if name == "-" {
+		// json:"-" skips, but json:"-," names the field "-".
+		if tag == "-" {
+			return "-"
+		}
+		return field.Name
+	}
+	if name == "" {
+		return field.Name
+	}
+	return name
+}
+
 // extractBinary walks a payload value and replaces every []byte with a
 // {"_placeholder":true,"num":N} marker, appending the buffer to *attachments in
 // the order encountered. The returned value is safe to JSON-marshal as the
-// binary event header. Nested slices and maps are traversed.
+// binary event header. Slices, maps, structs and pointers are traversed via
+// reflection so that the produced header JSON matches what encoding/json would
+// emit for non-binary fields (json tags / omitempty honored) while every []byte
+// becomes an ordered attachment + placeholder.
+//
+// extractBinary mirrors reflectHasBinary exactly: a value flagged as containing
+// binary by HasBinary is guaranteed to have its []byte leaves extracted here, so
+// the attachment count in the header always matches the frames that follow.
 func extractBinary(value interface{}, attachments *[][]byte) interface{} {
+	if value == nil {
+		return nil
+	}
+	// Fast paths for the already-generic JSON types preserve the prior behavior
+	// (and the prior map iteration semantics) exactly.
 	switch v := value.(type) {
 	case []byte:
-		num := len(*attachments)
-		*attachments = append(*attachments, v)
-		return map[string]interface{}{"_placeholder": true, "num": num}
+		return appendAttachment(v, attachments)
 	case map[string]interface{}:
 		out := make(map[string]interface{}, len(v))
 		for key, item := range v {
@@ -169,9 +271,151 @@ func extractBinary(value interface{}, attachments *[][]byte) interface{} {
 			out[i] = extractBinary(item, attachments)
 		}
 		return out
-	default:
-		return value
 	}
+	return reflectExtractBinary(reflect.ValueOf(value), attachments, 0)
+}
+
+// appendAttachment records buf as the next ordered attachment and returns the
+// placeholder marker that takes its place in the header JSON.
+func appendAttachment(buf []byte, attachments *[][]byte) interface{} {
+	num := len(*attachments)
+	*attachments = append(*attachments, buf)
+	return map[string]interface{}{"_placeholder": true, "num": num}
+}
+
+// reflectExtractBinary canonicalizes an arbitrary Go value into the generic
+// JSON shape (maps/slices/scalars) encoding/json would produce, replacing every
+// []byte leaf with a placeholder marker. It honors json struct tags, json:"-"
+// and the omitempty option, and is bounded by depth to stay cycle-safe. Values
+// without binary content fall through unchanged so non-binary fields keep their
+// concrete type and marshal normally.
+func reflectExtractBinary(v reflect.Value, attachments *[][]byte, depth int) interface{} {
+	if depth > maxBinaryWalkDepth || !v.IsValid() {
+		if v.IsValid() && v.CanInterface() {
+			return v.Interface()
+		}
+		return nil
+	}
+	switch v.Kind() {
+	case reflect.Interface:
+		if v.IsNil() {
+			return nil
+		}
+		return reflectExtractBinary(v.Elem(), attachments, depth+1)
+	case reflect.Ptr:
+		if v.IsNil() {
+			return nil
+		}
+		return reflectExtractBinary(v.Elem(), attachments, depth+1)
+	case reflect.Slice:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			// []byte leaf -> attachment.
+			return appendAttachment(toByteSlice(v), attachments)
+		}
+		out := make([]interface{}, v.Len())
+		for i := 0; i < v.Len(); i++ {
+			out[i] = reflectExtractBinary(v.Index(i), attachments, depth+1)
+		}
+		return out
+	case reflect.Array:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			// Byte arrays are not binary attachments; let encoding/json handle
+			// them (it encodes them as a number list).
+			return v.Interface()
+		}
+		out := make([]interface{}, v.Len())
+		for i := 0; i < v.Len(); i++ {
+			out[i] = reflectExtractBinary(v.Index(i), attachments, depth+1)
+		}
+		return out
+	case reflect.Map:
+		out := make(map[string]interface{}, v.Len())
+		for _, key := range v.MapKeys() {
+			out[mapKeyString(key)] = reflectExtractBinary(v.MapIndex(key), attachments, depth+1)
+		}
+		return out
+	case reflect.Struct:
+		out := make(map[string]interface{})
+		t := v.Type()
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			if field.PkgPath != "" { // unexported
+				continue
+			}
+			name := jsonFieldName(field)
+			if name == "-" {
+				continue
+			}
+			fv := v.Field(i)
+			if jsonOmitEmpty(field) && isEmptyValue(fv) {
+				continue
+			}
+			out[name] = reflectExtractBinary(fv, attachments, depth+1)
+		}
+		return out
+	default:
+		if v.CanInterface() {
+			return v.Interface()
+		}
+		return nil
+	}
+}
+
+// toByteSlice returns the []byte underlying v, which has a []byte-kinded type
+// (possibly a named type). Bytes() works for addressable/byte-element slices.
+func toByteSlice(v reflect.Value) []byte {
+	if v.Type() == byteSliceType {
+		return v.Bytes()
+	}
+	// Named slice type with []byte underlying: convert to []byte.
+	return v.Convert(byteSliceType).Bytes()
+}
+
+// mapKeyString renders a map key the way encoding/json would for a JSON object
+// key: string keys verbatim, integer keys as their base-10 text.
+func mapKeyString(key reflect.Value) string {
+	switch key.Kind() {
+	case reflect.String:
+		return key.String()
+	default:
+		// Fall back to fmt for integer / encoding.TextMarshaler-ish keys; this
+		// keeps numeric map keys (the common non-string case) JSON-correct.
+		return fmt.Sprintf("%v", key.Interface())
+	}
+}
+
+// jsonOmitEmpty reports whether the field carries the json omitempty option.
+func jsonOmitEmpty(field reflect.StructField) bool {
+	tag, ok := field.Tag.Lookup("json")
+	if !ok {
+		return false
+	}
+	parts := strings.Split(tag, ",")
+	for _, opt := range parts[1:] {
+		if opt == "omitempty" {
+			return true
+		}
+	}
+	return false
+}
+
+// isEmptyValue mirrors encoding/json's notion of an empty value for omitempty.
+func isEmptyValue(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+		return v.Len() == 0
+	case reflect.Bool:
+		return !v.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return v.Int() == 0
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return v.Uint() == 0
+	case reflect.Float32, reflect.Float64:
+		return v.Float() == 0
+	case reflect.Interface, reflect.Ptr:
+		return v.IsNil()
+	}
+	return false
 }
 
 // SerializeBinary encodes a message whose event payloads contain binary data as
