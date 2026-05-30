@@ -149,6 +149,9 @@ func TestNewClient(t *testing.T) {
 			if !tt.wantErr {
 				mockEngineIOClient.EXPECT().On("connect", gomock.Any()).AnyTimes()
 				mockEngineIOClient.EXPECT().On("message", gomock.Any()).AnyTimes()
+				mockEngineIOClient.EXPECT().On("reconnect", gomock.Any()).AnyTimes()
+				mockEngineIOClient.EXPECT().On("reconnecting", gomock.Any()).AnyTimes()
+				mockEngineIOClient.EXPECT().On("reconnect_failed", gomock.Any()).AnyTimes()
 			}
 
 			got, err := NewClient(tt.options...)

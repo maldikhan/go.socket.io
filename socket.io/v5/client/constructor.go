@@ -78,6 +78,22 @@ func NewClient(options ...ClientOption) (*Client, error) {
 	client.engineio.On("connect", client.connectSocketIO)
 	client.engineio.On("message", client.onMessage)
 
+	// Reconnect wiring. On a successful engine.io reconnect we must re-send the
+	// socket.io CONNECT packet so the namespace re-joins the server (mirrors the
+	// initial "connect" handling above). The reconnect lifecycle events are also
+	// surfaced to socket.io-level handlers so users can react with
+	// client.On("reconnect"/"reconnecting"/"reconnect_failed", ...).
+	client.engineio.On("reconnect", func(_ []byte) {
+		client.connectSocketIO(nil)
+		client.emitReserved("reconnect")
+	})
+	client.engineio.On("reconnecting", func(_ []byte) {
+		client.emitReserved("reconnecting")
+	})
+	client.engineio.On("reconnect_failed", func(_ []byte) {
+		client.emitReserved("reconnect_failed")
+	})
+
 	return client.Client, nil
 }
 
