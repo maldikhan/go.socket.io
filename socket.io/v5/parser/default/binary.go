@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 
 	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
 )
@@ -127,8 +128,15 @@ func (p *SocketIOV5DefaultParser) HasBinary(event *socketio_v5.Event) bool {
 
 // valueHasBinary reports whether a payload value contains any []byte, searching
 // nested slices and maps so binary buffers placed inside structures are found.
+// The fast paths cover the dynamically-typed shapes that arrive from JSON
+// decoding; everything else (structs, pointers, typed maps, named/typed
+// slices/arrays) is inspected by reflection. The reflection walk MUST stay in
+// lockstep with extractBinary's reflection walk so HasBinary and the extractor
+// agree on the attachment count.
 func valueHasBinary(value interface{}) bool {
 	switch v := value.(type) {
+	case nil:
+		return false
 	case []byte:
 		return true
 	case map[string]interface{}:
@@ -137,14 +145,17 @@ func valueHasBinary(value interface{}) bool {
 				return true
 			}
 		}
+		return false
 	case []interface{}:
 		for _, item := range v {
 			if valueHasBinary(item) {
 				return true
 			}
 		}
+		return false
+	default:
+		return reflectHasBinary(reflect.ValueOf(value), 0)
 	}
-	return false
 }
 
 // extractBinary walks a payload value and replaces every []byte with a
@@ -153,10 +164,12 @@ func valueHasBinary(value interface{}) bool {
 // binary event header. Nested slices and maps are traversed.
 func extractBinary(value interface{}, attachments *[][]byte) interface{} {
 	switch v := value.(type) {
+	case nil:
+		return nil
 	case []byte:
 		num := len(*attachments)
 		*attachments = append(*attachments, v)
-		return map[string]interface{}{"_placeholder": true, "num": num}
+		return placeholderMarker(num)
 	case map[string]interface{}:
 		out := make(map[string]interface{}, len(v))
 		for key, item := range v {
@@ -170,7 +183,11 @@ func extractBinary(value interface{}, attachments *[][]byte) interface{} {
 		}
 		return out
 	default:
-		return value
+		// Structs, pointers, typed maps and named/typed slices/arrays are walked
+		// by reflection in lockstep with valueHasBinary so the produced header
+		// (JSON-equal to encoding/json output for non-byte parts) and the
+		// attachment list stay consistent.
+		return reflectExtractBinary(reflect.ValueOf(value), attachments, 0)
 	}
 }
 
