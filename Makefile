@@ -20,7 +20,7 @@ bench:
 	go test -bench=. ./... -benchmem
 integration-test:
 	docker compose -f e2e/docker-compose.yml up -d --build --wait
-	E2E_SERVER_URL=http://localhost:3000 E2E_SERVER_URL_POLLING=http://localhost:3001 \
+	E2E_SERVER_URL=http://localhost:3000 \
 		go test -tags e2e -v ./e2e/... ; status=$$? ; \
 		docker compose -f e2e/docker-compose.yml down -v ; \
 		exit $$status

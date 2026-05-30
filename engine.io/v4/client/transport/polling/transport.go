@@ -44,12 +44,14 @@ type Transport struct {
 	reqCtx     context.Context
 	pollCancel context.CancelFunc
 
-	// handshakeDone is closed by SetHandshake once the engine.io handshake has
-	// assigned a session id. The continuous polling loop waits on it so it never
-	// issues a GET while RequestHandshake()'s own poll is in flight — engine.io
-	// rejects two concurrent polls on the same session.
+	// handshakeDone gates the continuous polling loop until a session id is
+	// known, so it never issues a GET while RequestHandshake()'s own poll is in
+	// flight — engine.io rejects two concurrent polls on the same session. It is
+	// closed by SetHandshake(), or immediately by Run() when the session id is
+	// already known (e.g. this transport is the target of an upgrade), so the
+	// gate is order-independent and can't deadlock if SetHandshake() happens to
+	// run before Run(). Guarded by mu.
 	handshakeDone chan struct{}
-	handshakeOnce sync.Once
 
 	// stopCh is closed by Stop() to broadcast the stop signal to any goroutine
 	// currently blocked inside poll(). Using a closed channel (instead of a
@@ -92,8 +94,23 @@ func (c *Transport) SetHandshake(handshake *engineio_v4.HandshakeResponse) {
 	}
 	c.pinger.Reset(pingInterval)
 	// Release the polling loop now that a session id is available.
-	if c.handshakeDone != nil {
-		c.handshakeOnce.Do(func() { close(c.handshakeDone) })
+	c.mu.Lock()
+	c.markHandshakeDoneLocked()
+	c.mu.Unlock()
+}
+
+// markHandshakeDoneLocked closes the handshake gate exactly once. The caller
+// must hold c.mu. It is a no-op if the gate has not been allocated yet (Run()
+// not called) or is already closed.
+func (c *Transport) markHandshakeDoneLocked() {
+	if c.handshakeDone == nil {
+		return
+	}
+	select {
+	case <-c.handshakeDone:
+		// already closed
+	default:
+		close(c.handshakeDone)
 	}
 }
 
@@ -128,15 +145,20 @@ func (c *Transport) Run(
 	c.reqCtx, c.pollCancel = context.WithCancel(ctx)
 	c.mu.Lock()
 	c.sid = sid
+	// Fresh handshake gate for this run. If a session id is already known (e.g.
+	// this transport is the target of an upgrade, where SetHandshake() has
+	// already run with handshakeDone still nil), open it immediately so
+	// pollingLoop never waits for a SetHandshake() that won't come again.
+	c.handshakeDone = make(chan struct{})
+	if sid != "" {
+		c.markHandshakeDoneLocked()
+	}
 	c.mu.Unlock()
 	c.url = url
 	c.messages = messagesChan
 	c.onClose = onClose
 	// Reset the stop state so the transport can be safely reused after a Stop().
 	atomic.StoreUint32(&c.stopped, 0)
-	// Fresh handshake gate for this run.
-	c.handshakeDone = make(chan struct{})
-	c.handshakeOnce = sync.Once{}
 	// Reinitialize stopPooling channel to ensure fresh channel for new run.
 	c.stopPooling = make(chan struct{}, 1)
 	// Reinitialize the stop broadcast channel and its sync.Once as well —
@@ -197,9 +219,12 @@ func (c *Transport) pollingLoop() error {
 	// earlier would race RequestHandshake()'s poll and trigger a concurrent-poll
 	// rejection from the server. A nil gate (transport driven without Run, e.g.
 	// in unit tests) means "already handshaked".
-	if c.handshakeDone != nil {
+	c.mu.RLock()
+	gate := c.handshakeDone
+	c.mu.RUnlock()
+	if gate != nil {
 		select {
-		case <-c.handshakeDone:
+		case <-gate:
 		case <-c.stopPooling:
 			return c.finishPolling(true, nil)
 		case <-c.ctx.Done():

@@ -7,18 +7,12 @@
 const { Server } = require('socket.io');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-// When ALLOW_UPGRADES=false the server advertises no upgrades, so a
-// polling-only client is never offered a websocket upgrade. This is used by
-// the dedicated polling-only test instance.
-const ALLOW_UPGRADES = (process.env.ALLOW_UPGRADES || 'true') !== 'false';
-// Server keepalive ping interval; defaults to the Socket.IO default (25s).
-const PING_INTERVAL = parseInt(process.env.PING_INTERVAL || '25000', 10);
 
 const io = new Server(PORT, {
   cors: { origin: '*' },
-  allowUpgrades: ALLOW_UPGRADES,
-  transports: ALLOW_UPGRADES ? ['polling', 'websocket'] : ['polling'],
-  pingInterval: PING_INTERVAL,
+  // Offer both transports so the client can connect polling-only,
+  // websocket-only, or start on polling and upgrade.
+  transports: ['polling', 'websocket'],
 });
 
 function wire(socket, ns) {
@@ -42,4 +36,4 @@ io.on('connection', (socket) => wire(socket, '/'));
 io.of('/admin').on('connection', (socket) => wire(socket, '/admin'));
 
 // eslint-disable-next-line no-console
-console.log('socket.io e2e server listening on port ' + PORT + ' (upgrades=' + ALLOW_UPGRADES + ')');
+console.log('socket.io e2e server listening on port ' + PORT);

@@ -1579,3 +1579,61 @@ func TestTransport_WithDebugPayload(t *testing.T) {
 	assert.NoError(t, WithDebugPayload(false)(c))
 	assert.True(t, c.redactPayload)
 }
+
+// TestHandshakeGateUpgradeToPolling is a regression guard: when polling is the
+// target of an upgrade, the engine client calls SetHandshake() on it (a no-op
+// while handshakeDone is still nil) before Run(), and Run() receives a known
+// session id. The gate must open from Run() so pollingLoop does not deadlock
+// waiting for a SetHandshake() that will not come again.
+func TestHandshakeGateUpgradeToPolling(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockHttpClient := mocks.NewMockHttpClient(ctrl)
+	mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
+
+	polled := make(chan struct{})
+	var once sync.Once
+	mockHttpClient.EXPECT().Do(gomock.Any()).DoAndReturn(func(req *http.Request) (*http.Response, error) {
+		once.Do(func() { close(polled) })
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	}).AnyTimes()
+
+	transport := &Transport{
+		log:        mockLogger,
+		httpClient: mockHttpClient,
+		pinger:     time.NewTicker(time.Minute),
+	}
+
+	// SetHandshake happens first, while handshakeDone is still nil (no-op).
+	transport.SetHandshake(&engineio_v4.HandshakeResponse{Sid: "known-sid", PingInterval: 1000})
+	transport.mu.RLock()
+	preRunGate := transport.handshakeDone
+	transport.mu.RUnlock()
+	assert.Nil(t, preRunGate, "handshakeDone must not be allocated before Run()")
+
+	// The upgrade then runs the transport with the known session id.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	onClose := make(chan error, 1)
+	err := transport.Run(ctx, &url.URL{Scheme: "http", Host: "localhost", Path: "/socket.io/"}, "known-sid", make(chan []byte, 1), onClose)
+	assert.NoError(t, err)
+
+	// pollingLoop must reach poll() instead of blocking on the gate.
+	select {
+	case <-polled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pollingLoop deadlocked on handshake gate after upgrade-to-polling")
+	}
+
+	assert.NoError(t, transport.Stop())
+	select {
+	case <-onClose:
+	case <-time.After(time.Second):
+		t.Fatal("expected onClose after Stop")
+	}
+}

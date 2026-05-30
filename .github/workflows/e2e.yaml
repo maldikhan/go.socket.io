@@ -34,7 +34,6 @@ jobs:
     - name: Run E2E tests
       env:
         E2E_SERVER_URL: http://localhost:3000
-        E2E_SERVER_URL_POLLING: http://localhost:3001
       run: go test -tags e2e -v ./e2e/...
 
     - name: Server logs on failure
