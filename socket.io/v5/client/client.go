@@ -25,6 +25,16 @@ type Client struct {
 	ackCallbacks map[int]func([]interface{})
 	ackCounter   int
 
+	// sendMu serializes the transport writes that make up a single logical
+	// socket.io packet. A binary event/ack is written as a text header frame
+	// followed by one or more binary attachment frames; without serialization
+	// two concurrent Emit calls could interleave their frames on the wire and
+	// the receiver would associate an attachment with the wrong header. The
+	// lock is held only around the frame writes (see sendPacket), never while
+	// an Emit is blocked waiting for the connection, so it does not serialize
+	// callers that are merely waiting to connect.
+	sendMu sync.Mutex
+
 	// pendingBinary holds a binary event/ack header whose attachment frames have
 	// not all arrived yet. Binary attachments are accumulated in
 	// pendingAttachments and, once the expected count is reached, reassembled
