@@ -45,10 +45,12 @@ func TestConnectSocketIO(t *testing.T) {
 		parser:        mockParser,
 		logger:        mockLogger,
 		handshakeData: map[string]interface{}{"foo": "bar"},
+		defaultNs:     &namespace{name: "/"},
 	}
 
 	expectedPacket := &socketio_v5.Message{
 		Type:    socketio_v5.PacketConnect,
+		NS:      "/",
 		Payload: client.handshakeData,
 	}
 
@@ -62,6 +64,18 @@ func TestConnectSocketIO(t *testing.T) {
 		str := fmt.Sprintf(format, v...)
 		assert.Contains(t, str, "send error")
 	})
+
+	client.connectSocketIO(nil)
+
+	// The CONNECT packet must target the configured default namespace, not "/".
+	client.defaultNs = &namespace{name: "/admin"}
+	adminPacket := &socketio_v5.Message{
+		Type:    socketio_v5.PacketConnect,
+		NS:      "/admin",
+		Payload: client.handshakeData,
+	}
+	mockParser.EXPECT().Serialize(gomock.Eq(adminPacket)).Return([]byte("encoded_packet"), nil)
+	mockEngineIO.EXPECT().Send(gomock.Any()).Return(nil)
 
 	client.connectSocketIO(nil)
 }
@@ -286,6 +300,7 @@ func TestConcurrentSetHandshakeDataAndConnect(t *testing.T) {
 		engineio:      mockEngineIO,
 		handshakeData: make(map[string]interface{}),
 		mutex:         sync.RWMutex{},
+		defaultNs:     &namespace{name: "/"},
 	}
 
 	mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte("packet"), nil).AnyTimes()

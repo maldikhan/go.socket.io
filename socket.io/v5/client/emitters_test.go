@@ -194,6 +194,54 @@ func TestNamespaceEmit(t *testing.T) {
 	}
 }
 
+// TestNamespaceEmitCarriesNamespace is a regression guard: emits from a
+// non-default namespace must serialize with that namespace set, both for plain
+// events and for events with an ack callback (the ack path previously dropped
+// the namespace, so the server received the packet on "/").
+func TestNamespaceEmitCarriesNamespace(t *testing.T) {
+	for _, withAck := range []bool{false, true} {
+		name := "plain event"
+		if withAck {
+			name = "event with ack"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockEngineIO := mocks.NewMockEngineIOClient(ctrl)
+			mockParser := mocks.NewMockParser(ctrl)
+			mockLogger := mocks.NewMockLogger(ctrl)
+
+			client := &Client{
+				engineio:     mockEngineIO,
+				parser:       mockParser,
+				ackCallbacks: make(map[int]func([]interface{})),
+				logger:       mockLogger,
+				ctx:          context.Background(),
+			}
+			ns := &namespace{client: client, name: "/admin"}
+
+			mockParser.EXPECT().Serialize(gomock.Any()).DoAndReturn(func(msg *socketio_v5.Message) ([]byte, error) {
+				assert.Equal(t, "/admin", msg.NS, "emit must target the namespace")
+				assert.Equal(t, socketio_v5.PacketEvent, msg.Type)
+				if withAck {
+					assert.NotNil(t, msg.AckId, "ack emit must carry an ack id")
+				}
+				return []byte{}, nil
+			})
+			mockEngineIO.EXPECT().Send(gomock.Any()).Return(nil)
+
+			var args []interface{}
+			if withAck {
+				mockParser.EXPECT().WrapCallback(gomock.Any()).Return(func(in []interface{}) {})
+				args = []interface{}{emit.WithAck(func() {})}
+			}
+
+			assert.NoError(t, ns.Emit("echo", args...))
+		})
+	}
+}
+
 func TestSendPacketWithAckTimeout(t *testing.T) {
 	tests := []struct {
 		name            string
