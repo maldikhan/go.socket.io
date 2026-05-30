@@ -32,12 +32,14 @@ func serverURL() string {
 //   - "polling":   HTTP long-polling only (no upgrade performed, even though the
 //     server offers one)
 //   - "websocket": websocket only (connects directly, no polling phase)
-func newClient(t *testing.T, mode string) *socketio.Client {
+//
+// Extra socket.io options (e.g. a non-default namespace) may be supplied.
+func newClient(t *testing.T, mode string, opts ...socketio.ClientOption) *socketio.Client {
 	t.Helper()
 	url := serverURL()
 
 	if mode == "default" {
-		client, err := socketio.NewClient(socketio.WithRawURL(url))
+		client, err := socketio.NewClient(append([]socketio.ClientOption{socketio.WithRawURL(url)}, opts...)...)
 		if err != nil {
 			t.Fatalf("new default client: %v", err)
 		}
@@ -75,7 +77,7 @@ func newClient(t *testing.T, mode string) *socketio.Client {
 		t.Fatalf("new engine client (%s): %v", mode, err)
 	}
 
-	client, err := socketio.NewClient(socketio.WithEngineIOClient(engine))
+	client, err := socketio.NewClient(append([]socketio.ClientOption{socketio.WithEngineIOClient(engine)}, opts...)...)
 	if err != nil {
 		t.Fatalf("new socket.io client (%s): %v", mode, err)
 	}
@@ -162,4 +164,10 @@ func TestE2E_PollingOnly(t *testing.T) {
 
 func TestE2E_WebsocketOnly(t *testing.T) {
 	runScenario(t, newClient(t, "websocket"))
+}
+
+// TestE2E_Namespace runs the same scenario on a non-default namespace ("/admin")
+// to cover the namespace connect/emit/ack path end-to-end.
+func TestE2E_Namespace(t *testing.T) {
+	runScenario(t, newClient(t, "default", socketio.WithDefaultNamespace("/admin")))
 }

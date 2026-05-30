@@ -73,6 +73,7 @@ func (c *Client) connectSocketIO(_ []byte) {
 
 	err := c.sendPacket(&socketio_v5.Message{
 		Type:    socketio_v5.PacketConnect,
+		NS:      c.defaultNs.name,
 		Payload: handshakeData,
 	})
 
