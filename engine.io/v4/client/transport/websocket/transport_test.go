@@ -74,7 +74,7 @@ func TestTransport_Run(t *testing.T) {
 
 	u, _ := url.Parse("http://example.com")
 	sid := "test-sid"
-	messagesChan := make(chan []byte, 1)
+	messagesChan := make(chan engineio_v4.Frame, 1)
 	onClose := make(chan error, 1)
 
 	transport := &Transport{
@@ -84,9 +84,9 @@ func TestTransport_Run(t *testing.T) {
 	}
 
 	mockWS.EXPECT().Dial(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
-	mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+	mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(message *[]byte) (bool, error) {
 		*message = []byte("test message")
-		return nil
+		return false, nil
 	}).AnyTimes()
 	mockWS.EXPECT().Close().Return(nil).AnyTimes()
 
@@ -106,7 +106,7 @@ func TestTransport_Run(t *testing.T) {
 	// Check message received
 	select {
 	case msg := <-messagesChan:
-		assert.Equal(t, []byte("test message"), msg)
+		assert.Equal(t, []byte("test message"), msg.Data)
 	case <-time.After(time.Second):
 		t.Fatal("Timeout waiting for message")
 	}
@@ -232,7 +232,7 @@ func TestTransport_wsCloseError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	messages := make(chan []byte, 1)
+	messages := make(chan engineio_v4.Frame, 1)
 	onClose := make(chan error, 1)
 	transport := &Transport{
 		log:         mockLogger,
@@ -254,15 +254,15 @@ func TestTransport_wsCloseError(t *testing.T) {
 	}).AnyTimes()
 	mockWS.EXPECT().Dial(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 	callCount := 0
-	mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+	mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(message *[]byte) (bool, error) {
 		callCount++
 		if callCount == 1 {
 			*message = []byte("test message")
-			return nil
+			return false, nil
 		}
 		// After first message, block until context is done
 		<-ctx.Done()
-		return context.Canceled
+		return false, context.Canceled
 	}).AnyTimes()
 	mockWS.EXPECT().Close().Return(errors.New("close error expected")).AnyTimes()
 
@@ -275,7 +275,7 @@ func TestTransport_wsCloseError(t *testing.T) {
 	// Check message received
 	select {
 	case msg := <-messages:
-		assert.Equal(t, []byte("test message"), msg)
+		assert.Equal(t, []byte("test message"), msg.Data)
 	case <-time.After(time.Second):
 		t.Fatal("Timeout waiting for message")
 	}
@@ -312,7 +312,7 @@ func TestTransport_connectWebSocket(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	messages := make(chan []byte, 1)
+	messages := make(chan engineio_v4.Frame, 1)
 	onClose := make(chan error, 1)
 	transport := &Transport{
 		log:         mockLogger,
@@ -328,9 +328,9 @@ func TestTransport_connectWebSocket(t *testing.T) {
 	mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
 	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 	mockWS.EXPECT().Dial(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
-	mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+	mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(message *[]byte) (bool, error) {
 		*message = []byte("test message")
-		return nil
+		return false, nil
 	}).AnyTimes()
 	mockWS.EXPECT().Close().Return(nil).AnyTimes()
 
@@ -343,7 +343,7 @@ func TestTransport_connectWebSocket(t *testing.T) {
 	// Check message received
 	select {
 	case msg := <-messages:
-		assert.Equal(t, []byte("test message"), msg)
+		assert.Equal(t, []byte("test message"), msg.Data)
 	case <-time.After(time.Second):
 		t.Fatal("Timeout waiting for message")
 	}
@@ -372,7 +372,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		messages := make(chan []byte, 1)
+		messages := make(chan engineio_v4.Frame, 1)
 		onClose := make(chan error, 1)
 		transport := &Transport{
 			log:         mockLogger,
@@ -387,15 +387,15 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
 		callCount := 0
-		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(message *[]byte) (bool, error) {
 			callCount++
 			if callCount == 1 {
 				*message = []byte("test message")
-				return nil
+				return false, nil
 			}
 			// After first message, block until context is done
 			<-ctx.Done()
-			return context.Canceled
+			return false, context.Canceled
 		}).AnyTimes()
 
 		go func() {
@@ -406,7 +406,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		// Check message is received
 		select {
 		case msg := <-messages:
-			assert.Equal(t, []byte("test message"), msg)
+			assert.Equal(t, []byte("test message"), msg.Data)
 		case <-time.After(time.Second):
 			t.Fatal("Timeout waiting for message")
 		}
@@ -434,7 +434,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		messages := make(chan []byte, 1)
+		messages := make(chan engineio_v4.Frame, 1)
 		onClose := make(chan error, 1)
 		transport := &Transport{
 			log:         mockLogger,
@@ -449,7 +449,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
 		ErrExpected := errors.New("test error")
-		mockWS.EXPECT().Receive(gomock.Any()).Return(ErrExpected).AnyTimes()
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).Return(false, ErrExpected).AnyTimes()
 		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
 
 		go func() {
@@ -479,7 +479,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		messages := make(chan []byte, 1)
+		messages := make(chan engineio_v4.Frame, 1)
 		onClose := make(chan error, 1)
 		transport := &Transport{
 			log:         mockLogger,
@@ -493,9 +493,9 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
 		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
-		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(message *[]byte) (bool, error) {
 			<-ctx.Done()
-			return context.Canceled
+			return false, context.Canceled
 		}).AnyTimes()
 
 		go func() {
@@ -531,7 +531,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		defer cancel()
 
 		// Use buffered channel to allow message delivery
-		messages := make(chan []byte, 10)
+		messages := make(chan engineio_v4.Frame, 10)
 		onClose := make(chan error, 1)
 		transport := &Transport{
 			log:         mockLogger,
@@ -546,19 +546,19 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
 		callCount := 0
-		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(message *[]byte) (bool, error) {
 			callCount++
 			if callCount == 1 {
 				*message = []byte("test message 1")
-				return nil
+				return false, nil
 			}
 			if callCount == 2 {
 				*message = []byte("test message 2")
-				return nil
+				return false, nil
 			}
 			// Block until context is done
 			<-ctx.Done()
-			return context.Canceled
+			return false, context.Canceled
 		}).AnyTimes()
 
 		go func() {
@@ -572,14 +572,14 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		// Receive multiple messages
 		select {
 		case msg := <-messages:
-			assert.Equal(t, []byte("test message 1"), msg)
+			assert.Equal(t, []byte("test message 1"), msg.Data)
 		case <-time.After(time.Second):
 			t.Fatal("Timeout waiting for first message")
 		}
 
 		select {
 		case msg := <-messages:
-			assert.Equal(t, []byte("test message 2"), msg)
+			assert.Equal(t, []byte("test message 2"), msg.Data)
 		case <-time.After(time.Second):
 			t.Fatal("Timeout waiting for second message")
 		}
@@ -608,7 +608,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		defer cancel()
 
 		// Use unbuffered channel so send blocks
-		messages := make(chan []byte)
+		messages := make(chan engineio_v4.Frame)
 		onClose := make(chan error, 1)
 		transport := &Transport{
 			log:         mockLogger,
@@ -623,15 +623,15 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
 		delivered := false
-		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(message *[]byte) (bool, error) {
 			if !delivered {
 				delivered = true
 				*message = []byte("blocked message")
-				return nil
+				return false, nil
 			}
 			// Subsequent calls block until context is done
 			<-ctx.Done()
-			return context.Canceled
+			return false, context.Canceled
 		}).AnyTimes()
 
 		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
@@ -671,7 +671,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		defer cancel()
 
 		// Use unbuffered channel so send blocks
-		messages := make(chan []byte)
+		messages := make(chan engineio_v4.Frame)
 		onClose := make(chan error, 1)
 		stopPooling := make(chan struct{}, 1)
 		transport := &Transport{
@@ -687,14 +687,14 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
 		delivered := false
-		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(message *[]byte) (bool, error) {
 			if !delivered {
 				delivered = true
 				*message = []byte("blocked message")
-				return nil
+				return false, nil
 			}
 			<-ctx.Done()
-			return context.Canceled
+			return false, context.Canceled
 		}).AnyTimes()
 
 		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
@@ -740,7 +740,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		messages := make(chan []byte)
+		messages := make(chan engineio_v4.Frame)
 		// Pre-fill onClose so the default branch is taken
 		onClose := make(chan error, 1)
 		onClose <- errors.New("pre-filled")
@@ -759,14 +759,14 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
 
 		delivered := false
-		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(message *[]byte) (bool, error) {
 			if !delivered {
 				delivered = true
 				*message = []byte("blocked message")
-				return nil
+				return false, nil
 			}
 			<-ctx.Done()
-			return context.Canceled
+			return false, context.Canceled
 		}).AnyTimes()
 
 		done := make(chan error, 1)
@@ -797,7 +797,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 
-		messages := make(chan []byte)
+		messages := make(chan engineio_v4.Frame)
 		// Pre-fill onClose so the default branch is taken
 		onClose := make(chan error, 1)
 		onClose <- errors.New("pre-filled")
@@ -815,14 +815,14 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
 
 		delivered := false
-		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(message *[]byte) (bool, error) {
 			if !delivered {
 				delivered = true
 				*message = []byte("blocked message")
-				return nil
+				return false, nil
 			}
 			<-ctx.Done()
-			return context.Canceled
+			return false, context.Canceled
 		}).AnyTimes()
 
 		done := make(chan error, 1)
@@ -854,7 +854,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		messages := make(chan []byte, 10)
+		messages := make(chan engineio_v4.Frame, 10)
 		onClose := make(chan error, 1)
 		transport := &Transport{
 			log:         mockLogger,
@@ -871,15 +871,15 @@ func TestTransport_wsReadLoop(t *testing.T) {
 
 		readCalls := 0
 		ErrExpected := errors.New("ws read error")
-		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(message *[]byte) (bool, error) {
 			readCalls++
 			if readCalls == 1 {
 				// First call returns a message
 				*message = []byte("message before error")
-				return nil
+				return false, nil
 			}
 			// Second call returns error immediately
-			return ErrExpected
+			return false, ErrExpected
 		}).AnyTimes()
 
 		go func() {
@@ -890,7 +890,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		// Wait for first message to be received
 		select {
 		case msg := <-messages:
-			assert.Equal(t, []byte("message before error"), msg)
+			assert.Equal(t, []byte("message before error"), msg.Data)
 		case <-time.After(time.Second):
 			t.Fatal("Timeout waiting for message")
 		}
@@ -918,7 +918,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		defer cancel()
 
 		// Use non-buffered onClose so we can see if send blocks
-		messages := make(chan []byte, 1)
+		messages := make(chan engineio_v4.Frame, 1)
 		onClose := make(chan error) // unbuffered - non-blocking send will not block
 		transport := &Transport{
 			log:         mockLogger,
@@ -934,7 +934,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
 
 		ErrExpected := errors.New("ws read error")
-		mockWS.EXPECT().Receive(gomock.Any()).Return(ErrExpected).AnyTimes()
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).Return(false, ErrExpected).AnyTimes()
 
 		// wsReadLoop should not block even though onClose is unbuffered
 		// because the send is non-blocking (select with default)
@@ -966,7 +966,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 
 		// Use unbuffered onClose
-		messages := make(chan []byte, 1)
+		messages := make(chan engineio_v4.Frame, 1)
 		onClose := make(chan error) // unbuffered - non-blocking send will skip
 		transport := &Transport{
 			log:         mockLogger,
@@ -980,9 +980,9 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
 		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
-		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(message *[]byte) (bool, error) {
 			<-ctx.Done()
-			return context.Canceled
+			return false, context.Canceled
 		}).AnyTimes()
 
 		done := make(chan error, 1)
@@ -1020,7 +1020,7 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		defer cancel()
 
 		// Use unbuffered onClose
-		messages := make(chan []byte, 1)
+		messages := make(chan engineio_v4.Frame, 1)
 		onClose := make(chan error) // unbuffered - non-blocking send will skip
 		transport := &Transport{
 			log:         mockLogger,
@@ -1034,10 +1034,10 @@ func TestTransport_wsReadLoop(t *testing.T) {
 		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
 		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
-		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(message *[]byte) error {
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(message *[]byte) (bool, error) {
 			// Block until context is done
 			<-ctx.Done()
-			return context.Canceled
+			return false, context.Canceled
 		}).AnyTimes()
 
 		done := make(chan error, 1)
@@ -1094,7 +1094,7 @@ func TestTransport_wsReadLoop_FullChannel(t *testing.T) {
 		receiveWsLogged := make(chan struct{})
 
 		// Unbuffered messages channel ensures the inner select blocks.
-		messages := make(chan []byte)
+		messages := make(chan engineio_v4.Frame)
 		onClose := make(chan error, 1)
 		transport := &Transport{
 			log:         mockLogger,
@@ -1112,14 +1112,14 @@ func TestTransport_wsReadLoop_FullChannel(t *testing.T) {
 		).Times(1)
 		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
 
-		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(msg *[]byte) error {
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(msg *[]byte) (bool, error) {
 			*msg = []byte("msg")
-			return nil
+			return false, nil
 		}).Times(1)
 		// A background goroutine may still be in Receive after the loop exits.
-		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(msg *[]byte) error {
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(msg *[]byte) (bool, error) {
 			<-ctx.Done()
-			return ctx.Err()
+			return false, ctx.Err()
 		}).AnyTimes()
 		mockWS.EXPECT().Close().Return(nil).AnyTimes()
 
@@ -1152,7 +1152,7 @@ func TestTransport_wsReadLoop_FullChannel(t *testing.T) {
 
 		receiveWsLogged := make(chan struct{})
 
-		messages := make(chan []byte)
+		messages := make(chan engineio_v4.Frame)
 		onClose := make(chan error, 1)
 		stopPooling := make(chan struct{}, 1)
 		transport := &Transport{
@@ -1169,9 +1169,9 @@ func TestTransport_wsReadLoop_FullChannel(t *testing.T) {
 		).Times(1)
 		mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
 
-		mockWS.EXPECT().Receive(gomock.Any()).DoAndReturn(func(msg *[]byte) error {
+		mockWS.EXPECT().ReceiveFrame(gomock.Any()).DoAndReturn(func(msg *[]byte) (bool, error) {
 			*msg = []byte("msg")
-			return nil
+			return false, nil
 		}).Times(1)
 		mockWS.EXPECT().Close().Return(nil).AnyTimes()
 
@@ -1235,6 +1235,39 @@ func TestTransport_SendMessage_Error(t *testing.T) {
 	err := transport.SendMessage([]byte("test message"))
 	assert.Error(t, err)
 	assert.Equal(t, "send error", err.Error())
+}
+
+// TestTransport_SendBinary verifies that binary attachments are written as
+// WebSocket binary frames and that send errors surface.
+func TestTransport_SendBinary(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockWS := mock_engineio_v4_client_transport.NewMockWebSocket(ctrl)
+	mockLogger := mock_engineio_v4_client_transport.NewMockLogger(ctrl)
+
+	transport := &Transport{
+		log: mockLogger,
+		ws:  mockWS,
+	}
+
+	mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+
+	t.Run("Successful binary send", func(t *testing.T) {
+		mockWS.EXPECT().SendBinary([]byte{0x1, 0x2, 0x3}).Return(nil)
+		err := transport.SendBinary([]byte{0x1, 0x2, 0x3})
+		assert.NoError(t, err)
+	})
+
+	t.Run("Binary send error", func(t *testing.T) {
+		mockWS.EXPECT().SendBinary(gomock.Any()).Return(errors.New("send error"))
+		err := transport.SendBinary([]byte{0x1})
+		assert.Error(t, err)
+		assert.Equal(t, "send error", err.Error())
+	})
 }
 
 func TestConcurrentSetHandshakeAndBuildUrl(t *testing.T) {

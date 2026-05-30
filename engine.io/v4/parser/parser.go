@@ -1,11 +1,16 @@
 package engineio_v4_parser
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 
 	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 )
+
+// binaryPrefix is the engine.io v4 marker that introduces a base64-encoded
+// binary attachment inside a (text) payload record, e.g. "bAQIDBA==".
+const binaryPrefix = 'b'
 
 // defaultMaxSerializeSize is the outbound payload limit applied when none is
 // configured. It mirrors the inbound default and guards against accidentally
@@ -50,6 +55,20 @@ func (p *EngineIOV4Parser) Parse(data []byte) (*engineio_v4.Message, error) {
 	if len(data) == 0 {
 		return nil, errors.New("empty message")
 	}
+	// A leading 'b' marks a base64-encoded binary attachment (engine.io v4
+	// represents binary inside a text record this way over HTTP long-polling).
+	// Decode it into a binary PacketMessage so callers receive the raw bytes.
+	if data[0] == binaryPrefix {
+		raw, err := base64.StdEncoding.DecodeString(string(data[1:]))
+		if err != nil {
+			return nil, fmt.Errorf("decode binary attachment: %w", err)
+		}
+		return &engineio_v4.Message{
+			Type:   engineio_v4.PacketMessage,
+			Data:   raw,
+			Binary: true,
+		}, nil
+	}
 	// data[0] is an ASCII digit '0'..'6' (0x30..0x36). Subtracting 0x30 maps it
 	// to the packet type. Any other byte yields a value greater than PacketNoop
 	// (bytes below '0' wrap around in the unsigned subtraction), so a single
@@ -72,6 +91,15 @@ func (p *EngineIOV4Parser) Serialize(msg *engineio_v4.Message) ([]byte, error) {
 	}
 	if int64(len(msg.Data)) > limit {
 		return nil, errors.New("message data too large")
+	}
+	// A binary attachment is serialized as 'b' followed by the base64 encoding
+	// of the raw bytes — the engine.io v4 text-payload representation used over
+	// HTTP long-polling.
+	if msg.Binary {
+		encoded := base64.StdEncoding.EncodeToString(msg.Data)
+		packet := make([]byte, 1, len(encoded)+1)
+		packet[0] = binaryPrefix
+		return append(packet, encoded...), nil
 	}
 	packet := make([]byte, 1, len(msg.Data)+1)
 	packet[0] = byte(msg.Type) + 0x30

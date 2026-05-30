@@ -163,3 +163,85 @@ func TestE2E_PollingOnly(t *testing.T) {
 func TestE2E_WebsocketOnly(t *testing.T) {
 	runScenario(t, newClient(t, "websocket"))
 }
+
+// runBinaryScenario exercises the Socket.IO v5 binary attachment paths against
+// the real server: a binary ack round-trip ("binEcho") and a server-pushed
+// binary event ("binWelcome"), asserting the []byte survives both directions.
+func runBinaryScenario(t *testing.T, client *socketio.Client) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	binWelcome := make(chan []byte, 1)
+	client.On("binWelcome", func(buf []byte) {
+		select {
+		case binWelcome <- buf:
+		default:
+		}
+	})
+
+	connected := make(chan struct{}, 1)
+	client.On("connect", func() {
+		select {
+		case connected <- struct{}{}:
+		default:
+		}
+	})
+
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+
+	select {
+	case <-connected:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for connect event")
+	}
+
+	// Binary ack round-trip: send a Buffer, expect the same bytes back.
+	payload := []byte{0x00, 0x01, 0x02, 0xFF, 0x7F, 0x80}
+	ack := make(chan []byte, 1)
+	if err := client.Emit("binEcho", payload, emit.WithAck(func(buf []byte) {
+		select {
+		case ack <- buf:
+		default:
+		}
+	})); err != nil {
+		t.Fatalf("emit binEcho: %v", err)
+	}
+	select {
+	case got := <-ack:
+		if string(got) != string(payload) {
+			t.Fatalf("binEcho ack = %v, want %v", got, payload)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for binEcho ack")
+	}
+
+	// Server-pushed binary event: emit "binPush", expect a "binWelcome" Buffer.
+	if err := client.Emit("binPush", "world"); err != nil {
+		t.Fatalf("emit binPush: %v", err)
+	}
+	select {
+	case got := <-binWelcome:
+		if string(got) != "world" {
+			t.Fatalf("binWelcome payload = %q, want %q", got, "world")
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for binWelcome event")
+	}
+}
+
+func TestE2E_BinaryDefaultTransport(t *testing.T) {
+	runBinaryScenario(t, newClient(t, "default"))
+}
+
+func TestE2E_BinaryPollingOnly(t *testing.T) {
+	runBinaryScenario(t, newClient(t, "polling"))
+}
+
+func TestE2E_BinaryWebsocketOnly(t *testing.T) {
+	runBinaryScenario(t, newClient(t, "websocket"))
+}

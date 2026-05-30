@@ -37,7 +37,7 @@ func TestClient_Connect(t *testing.T) {
 		parser:              mockParser,
 		supportedTransports: map[engineio_v4.EngineIOTransport]Transport{engineio_v4.TransportPolling: mockTransport},
 		transport:           mockTransport,
-		messages:            make(chan []byte, 100),
+		messages:            make(chan engineio_v4.Frame, 100),
 		transportClosed:     make(chan error, 1),
 		ctx:                 ctx,
 	}
@@ -61,7 +61,7 @@ func TestClient_Connect(t *testing.T) {
 		mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 		mockTransport.EXPECT().RequestHandshake().DoAndReturn(func() error {
 			go func() {
-				client.messages <- append([]byte{'0'}, respData...)
+				client.messages <- engineio_v4.Frame{Data: append([]byte{'0'}, respData...)}
 			}()
 			return nil
 		})
@@ -152,7 +152,7 @@ func TestClient_messageLoop(t *testing.T) {
 	client := &Client{
 		log:      mockLogger,
 		parser:   mockParser,
-		messages: make(chan []byte, 100),
+		messages: make(chan engineio_v4.Frame, 100),
 		ctx:      ctx,
 	}
 
@@ -162,7 +162,7 @@ func TestClient_messageLoop(t *testing.T) {
 		mockParser.EXPECT().Parse([]byte("test")).Return(&engineio_v4.Message{Type: engineio_v4.PacketMessage}, nil)
 
 		go client.messageLoop(ctx, client.messages)
-		client.messages <- []byte("test")
+		client.messages <- engineio_v4.Frame{Data: []byte("test")}
 		time.Sleep(10 * time.Millisecond)
 	})
 
@@ -171,13 +171,13 @@ func TestClient_messageLoop(t *testing.T) {
 		mockParser.EXPECT().Parse([]byte("error")).Return(nil, errors.New("parse error"))
 
 		go client.messageLoop(ctx, client.messages)
-		client.messages <- []byte("error")
+		client.messages <- engineio_v4.Frame{Data: []byte("error")}
 		time.Sleep(10 * time.Millisecond)
 	})
 
 	t.Run("Context done", func(t *testing.T) {
 		mockLogger.EXPECT().Warnf("context done, engine.io client stopped processing messages").AnyTimes()
-		messages := make(chan []byte, 1)
+		messages := make(chan engineio_v4.Frame, 1)
 		go client.messageLoop(ctx, messages)
 		cancel()
 		time.Sleep(10 * time.Millisecond)
@@ -205,7 +205,7 @@ func TestClient_transportUpgrade(t *testing.T) {
 		parser:          mockParser,
 		transport:       mockOldTransport,
 		transportClosed: make(chan error, 1),
-		messages:        make(chan []byte, 100),
+		messages:        make(chan engineio_v4.Frame, 100),
 	}
 
 	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
@@ -949,7 +949,7 @@ func TestClient_Close_stops_ticker(t *testing.T) {
 		log:       mockLogger,
 		parser:    mockParser,
 		transport: mockTransport,
-		messages:  make(chan []byte, 1),
+		messages:  make(chan engineio_v4.Frame, 1),
 	}
 
 	// Create a ticker that we'll verify gets stopped

@@ -28,6 +28,20 @@ function wire(socket, ns) {
     socket.emit('welcome', 'hello ' + name);
   });
 
+  // "binEcho" echoes a binary Buffer back through the ack callback, exercising
+  // the socket.io binary attachment (PacketBinaryAck) path.
+  socket.on('binEcho', (buf, ack) => {
+    if (typeof ack === 'function') {
+      ack(buf);
+    }
+  });
+
+  // "binPush" triggers a server-pushed "binWelcome" event carrying a binary
+  // Buffer (PacketBinaryEvent), so the client receives []byte without an ack.
+  socket.on('binPush', (name) => {
+    socket.emit('binWelcome', Buffer.from(String(name)));
+  });
+
   // eslint-disable-next-line no-console
   console.log('client connected on namespace ' + ns + ': ' + socket.id);
 }

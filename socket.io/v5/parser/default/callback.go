@@ -33,6 +33,19 @@ func (p *SocketIOV5DefaultParser) WrapCallback(callback interface{}) func(in []i
 		args := make([]reflect.Value, callbackType.NumIn())
 		for i := 0; i < callbackType.NumIn(); i++ {
 			argType := callbackType.In(i)
+
+			// Reconstructed binary attachments arrive as []byte rather than
+			// json.RawMessage. When the callback parameter is []byte, pass the
+			// raw bytes straight through instead of JSON-unmarshaling them.
+			if raw, isBytes := in[i].([]byte); isBytes {
+				if argType == reflect.TypeOf([]byte(nil)) {
+					args[i] = reflect.ValueOf(raw)
+					continue
+				}
+				p.logger.Errorf("Wrong data in %d json entity", i)
+				return
+			}
+
 			argValue := reflect.New(argType).Interface()
 			data, ok := in[i].(json.RawMessage)
 			if !ok {

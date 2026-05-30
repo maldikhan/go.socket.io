@@ -23,6 +23,7 @@ type Client struct {
 	pingTimeout         time.Duration
 	parser              Parser
 	messageHandler      func([]byte)
+	binaryHandler       func([]byte)
 	closeHandler        func()
 	reconnectAttempts   int
 	reconnectWait       time.Duration
@@ -33,7 +34,7 @@ type Client struct {
 	stopPooling         chan struct{}
 	transportClosed     chan error
 	afterConnect        func()
-	messages            chan []byte
+	messages            chan engineio_v4.Frame
 	messagesDone        chan struct{} // closed when messageLoop exits
 
 	// transportMu serializes access to the transport field and
@@ -67,7 +68,7 @@ func (c *Client) payload(data []byte) string {
 func (c *Client) Connect(ctx context.Context) error {
 	c.ctx = ctx
 
-	c.messages = make(chan []byte, 100)
+	c.messages = make(chan engineio_v4.Frame, 100)
 
 	// Run transport before starting the message loop so that a Run()
 	// failure doesn't leak a goroutine.
@@ -103,7 +104,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (c *Client) messageLoop(ctx context.Context, messages <-chan []byte) {
+func (c *Client) messageLoop(ctx context.Context, messages <-chan engineio_v4.Frame) {
 	if c.messagesDone != nil {
 		defer close(c.messagesDone)
 	}
@@ -113,11 +114,11 @@ func (c *Client) messageLoop(ctx context.Context, messages <-chan []byte) {
 	}
 	for {
 		select {
-		case message, ok := <-messages:
+		case frame, ok := <-messages:
 			if !ok {
 				return
 			}
-			err := c.handlePacket(message)
+			err := c.handleFrame(frame)
 			if err != nil {
 				c.log.Errorf("handle packet error: %s", err)
 			}
@@ -259,6 +260,53 @@ func (c *Client) handleHandshake(data []byte) error {
 	return nil
 }
 
+// recordSeparator is the engine.io v4 payload delimiter (U+001E) that joins
+// multiple packets inside a single HTTP long-polling body.
+const recordSeparator = '\x1e'
+
+// handleFrame dispatches one transport frame. A binary frame is delivered as a
+// single attachment to the binary handler. A text frame may carry several
+// engine.io packets joined by the record separator (HTTP long-polling), so it
+// is split and each record handled in order. WebSocket frames carry exactly one
+// record, so splitting is a no-op there.
+func (c *Client) handleFrame(frame engineio_v4.Frame) error {
+	if frame.IsBinary {
+		c.log.Debugf("handle binary frame: %s", c.payload(frame.Data))
+		c.handlerMu.RLock()
+		handler := c.binaryHandler
+		c.handlerMu.RUnlock()
+		if handler != nil {
+			handler(frame.Data)
+		}
+		return nil
+	}
+
+	for _, record := range splitRecords(frame.Data) {
+		if len(record) == 0 {
+			continue
+		}
+		if err := c.handlePacket(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// splitRecords splits a text payload on the engine.io record separator. A
+// payload without separators yields a single record, so single-packet frames
+// (and every WebSocket frame) flow through unchanged.
+func splitRecords(data []byte) [][]byte {
+	var out [][]byte
+	start := 0
+	for i := 0; i < len(data); i++ {
+		if data[i] == recordSeparator {
+			out = append(out, data[start:i])
+			start = i + 1
+		}
+	}
+	return append(out, data[start:])
+}
+
 func (c *Client) handlePacket(packetData []byte) error {
 	c.log.Debugf("handle packet: %s", c.payload(packetData))
 	packet, err := c.parser.Parse(packetData)
@@ -311,8 +359,15 @@ func (c *Client) handlePacket(packetData []byte) error {
 	case engineio_v4.PacketMessage:
 		c.handlerMu.RLock()
 		handler := c.messageHandler
+		binaryHandler := c.binaryHandler
 		c.handlerMu.RUnlock()
-		if handler != nil {
+		// A base64 "b"-prefixed record decodes to a binary attachment; route it
+		// to the binary handler so socket.io can reassemble binary events.
+		if packet.Binary {
+			if binaryHandler != nil {
+				binaryHandler(packet.Data)
+			}
+		} else if handler != nil {
 			handler(packet.Data)
 		}
 	}
@@ -368,6 +423,38 @@ func (c *Client) Send(message []byte) error {
 	return t.SendMessage(msg)
 }
 
+// SendBinary delivers a raw binary attachment after waiting on the same
+// handshake/upgrade gates as Send(), so binary frames are never written on a
+// transport that is mid-upgrade or closed. The transport encodes the bytes for
+// the active transport (raw binary frame for websocket, base64 record for
+// long-polling).
+func (c *Client) SendBinary(message []byte) error {
+	c.transportMu.RLock()
+	wh := c.waitHandshake
+	wu := c.waitUpgrade
+	c.transportMu.RUnlock()
+
+	if wh != nil {
+		<-wh
+	}
+	if wu != nil {
+		<-wu
+	}
+
+	c.transportMu.RLock()
+	t := c.transport
+	c.transportMu.RUnlock()
+
+	if t == nil {
+		return errors.New("client is closed")
+	}
+
+	// Pass the raw attachment bytes to the transport; each transport applies its
+	// own wire encoding (raw binary frame over websocket, base64 "b"-record over
+	// HTTP long-polling).
+	return t.SendBinary(message)
+}
+
 func (c *Client) On(event string, handler func([]byte)) {
 	c.handlerMu.Lock()
 	defer c.handlerMu.Unlock()
@@ -377,6 +464,8 @@ func (c *Client) On(event string, handler func([]byte)) {
 		c.afterConnect = func() { handler(nil) }
 	case "message":
 		c.messageHandler = handler
+	case "binary":
+		c.binaryHandler = handler
 	case "close":
 		c.closeHandler = func() { handler(nil) }
 	}

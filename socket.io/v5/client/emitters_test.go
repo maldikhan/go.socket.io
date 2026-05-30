@@ -38,6 +38,7 @@ func TestEmitBeforeConnected(t *testing.T) {
 	}
 
 	t.Run("wait ok", func(t *testing.T) {
+		mockParser.EXPECT().HasBinary(gomock.Any()).Return(false).AnyTimes()
 		mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte{}, nil)
 		mockEngineIO.EXPECT().Send(gomock.Any()).Return(nil)
 
@@ -121,6 +122,7 @@ func TestClientEmit(t *testing.T) {
 		},
 	}
 
+	mockParser.EXPECT().HasBinary(gomock.Any()).Return(false).AnyTimes()
 	mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte{}, nil)
 	mockEngineIO.EXPECT().Send(gomock.Any()).Return(nil)
 
@@ -180,6 +182,7 @@ func TestNamespaceEmit(t *testing.T) {
 			ns := &namespace{client: client}
 
 			if tt.expectedError == nil {
+				mockParser.EXPECT().HasBinary(gomock.Any()).Return(false).AnyTimes()
 				mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte{}, nil)
 				mockEngineIO.EXPECT().Send(gomock.Any()).Return(nil)
 			}
@@ -227,6 +230,7 @@ func TestSendPacketWithAckTimeout(t *testing.T) {
 				logger:       mockLogger,
 			}
 
+			mockParser.EXPECT().HasBinary(gomock.Any()).Return(false).AnyTimes()
 			mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte{}, nil)
 			mockEngineIO.EXPECT().Send(gomock.Any()).Return(nil)
 
@@ -269,6 +273,7 @@ func TestSendPacketWithAckTimeout(t *testing.T) {
 		mockTimer := mocks.NewMockTimer(ctrl)
 		mockLogger := mocks.NewMockLogger(ctrl)
 
+		mockParser.EXPECT().HasBinary(gomock.Any()).Return(false).AnyTimes()
 		mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte{}, nil)
 		mockEngineIO.EXPECT().Send(gomock.Any()).Return(nil)
 		mockTimer.EXPECT().After(gomock.Any()).DoAndReturn(func(time.Duration) <-chan time.Time {
@@ -325,6 +330,7 @@ func TestSendPacketWithAckTimeout(t *testing.T) {
 		mockTimer := mocks.NewMockTimer(ctrl)
 		mockLogger := mocks.NewMockLogger(ctrl)
 
+		mockParser.EXPECT().HasBinary(gomock.Any()).Return(false).AnyTimes()
 		mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte{}, nil)
 		mockEngineIO.EXPECT().Send(gomock.Any()).Return(nil)
 		mockTimer.EXPECT().After(gomock.Any()).DoAndReturn(func(time.Duration) <-chan time.Time {
@@ -411,6 +417,7 @@ func TestSendPacket(t *testing.T) {
 				parser:   mockParser,
 			}
 
+			mockParser.EXPECT().HasBinary(gomock.Any()).Return(false).AnyTimes()
 			mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte{}, tt.serializeErr)
 			if tt.serializeErr == nil {
 				mockEngineIO.EXPECT().Send(gomock.Any()).Return(tt.sendErr)

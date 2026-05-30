@@ -33,6 +33,90 @@ func (c *Client) onMessage(data []byte) {
 		return
 	}
 
+	// A binary event/ack header is not complete until its attachment frames
+	// arrive. Stage it and wait for onBinaryAttachment to reassemble and
+	// dispatch it. A zero-attachment binary packet is reassembled immediately.
+	if msg.BinaryAttachments != nil {
+		if c.stageBinary(msg) {
+			return
+		}
+	}
+
+	c.dispatch(msg)
+}
+
+// stageBinary stores a binary header awaiting attachments. It returns true when
+// the message is incomplete (more attachments expected) and the caller must not
+// dispatch yet; it returns false once the message is fully reconstructed (e.g.
+// zero attachments) so the caller dispatches it normally.
+func (c *Client) stageBinary(msg *socketio_v5.Message) bool {
+	needed := *msg.BinaryAttachments
+	c.binaryMu.Lock()
+	if needed == 0 {
+		c.clearPendingLocked()
+		c.binaryMu.Unlock()
+		if err := c.parser.ReconstructBinary(msg, nil); err != nil {
+			c.logger.Errorf("Can't reconstruct binary message: %v", err)
+			return true
+		}
+		return false
+	}
+	c.pendingBinary = msg
+	c.pendingNeeded = needed
+	c.pendingAttachments = make([][]byte, 0, needed)
+	c.binaryMu.Unlock()
+	return true
+}
+
+// onBinaryAttachment collects a binary attachment frame and, once the staged
+// header has received all of its expected attachments, reconstructs and
+// dispatches the complete message.
+func (c *Client) onBinaryAttachment(data []byte) {
+	c.binaryMu.Lock()
+	if c.pendingBinary == nil {
+		c.binaryMu.Unlock()
+		c.logger.Errorf("received binary attachment without a pending binary packet, dropping")
+		return
+	}
+	// Copy the frame: the transport may reuse the underlying buffer.
+	buf := make([]byte, len(data))
+	copy(buf, data)
+	c.pendingAttachments = append(c.pendingAttachments, buf)
+	if len(c.pendingAttachments) < c.pendingNeeded {
+		c.binaryMu.Unlock()
+		return
+	}
+	msg := c.pendingBinary
+	attachments := c.pendingAttachments
+	c.clearPendingLocked()
+	c.binaryMu.Unlock()
+
+	if err := c.parser.ReconstructBinary(msg, attachments); err != nil {
+		c.logger.Errorf("Can't reconstruct binary message: %v", err)
+		return
+	}
+	c.dispatch(msg)
+}
+
+// clearPendingLocked resets the staged binary state. The caller must hold
+// binaryMu.
+func (c *Client) clearPendingLocked() {
+	c.pendingBinary = nil
+	c.pendingNeeded = 0
+	c.pendingAttachments = nil
+}
+
+// dispatch routes a fully decoded message (binary or text) to the appropriate
+// namespace handlers. Binary events/acks are normalized to their text packet
+// type so the existing dispatch paths handle them uniformly.
+func (c *Client) dispatch(msg *socketio_v5.Message) {
+	switch msg.Type {
+	case socketio_v5.PacketBinaryEvent:
+		msg.Type = socketio_v5.PacketEvent
+	case socketio_v5.PacketBinaryAck:
+		msg.Type = socketio_v5.PacketAck
+	}
+
 	// Handle ACK packets first — they don't carry a meaningful namespace,
 	// so they must not be dropped by the unknown-namespace guard below.
 	if msg.Type == socketio_v5.PacketAck {

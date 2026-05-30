@@ -3,6 +3,7 @@ package engineio_v4_client_transport
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -33,7 +34,7 @@ type Transport struct {
 	sid string
 	ctx context.Context
 
-	messages    chan<- []byte
+	messages    chan<- engineio_v4.Frame
 	onClose     chan<- error
 	stopPooling chan struct{}
 
@@ -136,7 +137,7 @@ func (c *Transport) Run(
 	ctx context.Context,
 	url *url.URL,
 	sid string,
-	messagesChan chan<- []byte,
+	messagesChan chan<- engineio_v4.Frame,
 	onClose chan<- error,
 ) error {
 	c.ctx = ctx
@@ -367,7 +368,7 @@ func (c *Transport) poll() error {
 	c.log.Debugf("receiveHttp: %s", c.payload(body))
 
 	select {
-	case c.messages <- body:
+	case c.messages <- engineio_v4.Frame{Data: body}:
 	case <-c.ctx.Done():
 		return c.ctx.Err()
 	case <-c.stopCh:
@@ -380,7 +381,20 @@ func (c *Transport) poll() error {
 }
 
 func (c *Transport) SendMessage(msg []byte) error {
+	return c.post(msg)
+}
 
+// SendBinary POSTs a raw binary attachment encoded as the engine.io v4 base64
+// "b"-record. Over HTTP long-polling binary cannot travel as its own frame, so
+// it is sent as a base64 text record the server decodes back to bytes.
+func (c *Transport) SendBinary(msg []byte) error {
+	encoded := make([]byte, 1, base64.StdEncoding.EncodedLen(len(msg))+1)
+	encoded[0] = 'b'
+	encoded = append(encoded, []byte(base64.StdEncoding.EncodeToString(msg))...)
+	return c.post(encoded)
+}
+
+func (c *Transport) post(msg []byte) error {
 	c.log.Debugf("sendHttp: %s", c.payload(msg))
 	req, err := http.NewRequestWithContext(c.ctx, "POST", c.buildHttpUrl().String(), bytes.NewReader(msg))
 	if err != nil {

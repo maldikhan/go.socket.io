@@ -13,11 +13,13 @@ func (p *SocketIOV5DefaultParser) validateMessage(msg *socketio_v5.Message) erro
 		return errors.New("empty package")
 	}
 	switch msg.Type {
-	case socketio_v5.PacketBinaryAck, socketio_v5.PacketBinaryEvent:
-		return errors.New("biniary events are not supported yet")
-	case socketio_v5.PacketEvent:
+	case socketio_v5.PacketEvent, socketio_v5.PacketBinaryEvent:
 		if msg.Event == nil || msg.Event.Name == "" {
 			return errors.New("wrong event name")
+		}
+	case socketio_v5.PacketBinaryAck:
+		if msg.Event == nil {
+			return errors.New("wrong ack payload")
 		}
 	}
 	return nil
@@ -65,19 +67,32 @@ func (p *SocketIOV5DefaultParser) prepareSerializationInfo(msg *socketio_v5.Mess
 }
 
 func (p *SocketIOV5DefaultParser) Serialize(msg *socketio_v5.Message) ([]byte, error) {
-
 	err := p.validateMessage(msg)
 	if err != nil {
 		return nil, err
 	}
+	return p.serializeHeader(msg)
+}
 
+// serializeHeader assembles the textual socket.io packet header. For binary
+// packets (BinaryAttachments != nil) it inserts the "<count>-" attachment
+// prefix between the type and the namespace, e.g. "51-/admin,2[...]".
+func (p *SocketIOV5DefaultParser) serializeHeader(msg *socketio_v5.Message) ([]byte, error) {
 	pkgLen, jsonData, ackId, err := p.prepareSerializationInfo(msg)
 	if err != nil {
 		return nil, err
 	}
 
+	var attachmentPrefix []byte
+	if msg.BinaryAttachments != nil {
+		attachmentPrefix = append([]byte(strconv.Itoa(*msg.BinaryAttachments)), '-')
+		pkgLen += len(attachmentPrefix)
+	}
+
 	packet := make([]byte, 1, 1+pkgLen)
 	packet[0] = byte(msg.Type) + 0x30
+
+	packet = append(packet, attachmentPrefix...)
 
 	if msg.NS != "/" && msg.NS != "" {
 		packet = append(packet, []byte(msg.NS)...)

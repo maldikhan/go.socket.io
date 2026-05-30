@@ -147,6 +147,24 @@ func (c *Client) sendPacketWithAckTimeout(
 }
 
 func (c *Client) sendPacket(packet *socketio_v5.Message) error {
+	// Events carrying []byte payloads are sent as a binary packet: a text header
+	// with {"_placeholder"} markers followed by the raw attachment frames.
+	if packet.Event != nil && c.parser.HasBinary(packet.Event) {
+		header, attachments, err := c.parser.SerializeBinary(packet)
+		if err != nil {
+			return err
+		}
+		if err := c.engineio.Send(header); err != nil {
+			return err
+		}
+		for _, attachment := range attachments {
+			if err := c.engineio.SendBinary(attachment); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	packetData, err := c.parser.Serialize(packet)
 	if err != nil {
 		return err

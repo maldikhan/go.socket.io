@@ -25,6 +25,16 @@ type Client struct {
 	ackCallbacks map[int]func([]interface{})
 	ackCounter   int
 
+	// pendingBinary holds a binary event/ack header whose attachment frames have
+	// not all arrived yet. Binary attachments are accumulated in
+	// pendingAttachments and, once the expected count is reached, reassembled
+	// into the message before dispatch. Guarded by binaryMu so staging and the
+	// attachment callbacks never race.
+	binaryMu           sync.Mutex
+	pendingBinary      *socketio_v5.Message
+	pendingNeeded      int
+	pendingAttachments [][]byte
+
 	// redactPayload, when true, replaces raw payloads in debug logs with a
 	// size marker. Zero value is verbose; NewClient sets the safe default.
 	redactPayload bool

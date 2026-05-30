@@ -70,7 +70,7 @@ func TestRequestHandshake(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	messages := make(chan []byte, 1)
+	messages := make(chan engineio_v4.Frame, 1)
 	client := &Transport{
 		log:        mockLogger,
 		httpClient: mockHttpClient,
@@ -133,7 +133,7 @@ func TestRequestHandshake_StopDuringHandshake(t *testing.T) {
 		httpClient:  mockHTTPClient,
 		url:         &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
 		ctx:         ctx,
-		messages:    make(chan []byte), // unbuffered: send will block
+		messages:    make(chan engineio_v4.Frame), // unbuffered: send will block
 		stopPooling: make(chan struct{}, 1),
 		stopCh:      stopCh,
 	}
@@ -178,7 +178,7 @@ func TestRun(t *testing.T) {
 	defer cancel()
 
 	url, _ := url.Parse("http://example.com")
-	messagesChan := make(chan []byte, 1)
+	messagesChan := make(chan engineio_v4.Frame, 1)
 	onCloseChan := make(chan error, 1)
 
 	client := &Transport{
@@ -330,7 +330,7 @@ func TestPollingLoop(t *testing.T) {
 			stopCh:           make(chan struct{}),
 			ctx:              ctx,
 			onClose:          onClose,
-			messages:         make(chan []byte, 1),
+			messages:         make(chan engineio_v4.Frame, 1),
 			pollErrorBackoff: time.Second, // long enough that Stop() interrupts the backoff
 		}
 
@@ -397,7 +397,7 @@ func TestPollingLoop(t *testing.T) {
 			stopCh:      make(chan struct{}),
 			ctx:         ctx,
 			onClose:     onClose,
-			messages:    make(chan []byte, 1),
+			messages:    make(chan engineio_v4.Frame, 1),
 		}
 		// Run() normally wires these; set them up directly for the unit test.
 		client.reqCtx, client.pollCancel = context.WithCancel(ctx)
@@ -448,7 +448,7 @@ func TestPollingLoop(t *testing.T) {
 			stopCh:        make(chan struct{}),
 			ctx:           ctx,
 			onClose:       make(chan error, 1),
-			messages:      make(chan []byte, 1),
+			messages:      make(chan engineio_v4.Frame, 1),
 			handshakeDone: make(chan struct{}),
 		}
 		client.reqCtx, client.pollCancel = context.WithCancel(ctx)
@@ -562,7 +562,7 @@ func TestPollingLoop(t *testing.T) {
 			stopCh:      make(chan struct{}),
 			ctx:         ctx,
 			onClose:     make(chan error, 1),
-			messages:    make(chan []byte, 1),
+			messages:    make(chan engineio_v4.Frame, 1),
 		}
 		client.reqCtx, client.pollCancel = context.WithCancel(ctx)
 
@@ -603,7 +603,7 @@ func TestPollingLoop(t *testing.T) {
 			stopCh:           make(chan struct{}),
 			ctx:              ctx,
 			onClose:          make(chan error, 1),
-			messages:         make(chan []byte, 1),
+			messages:         make(chan engineio_v4.Frame, 1),
 			pollErrorBackoff: 5 * time.Millisecond,
 		}
 		client.reqCtx, client.pollCancel = context.WithCancel(ctx)
@@ -641,7 +641,7 @@ func TestPollingLoop(t *testing.T) {
 			stopCh:           make(chan struct{}),
 			ctx:              ctx,
 			onClose:          make(chan error, 1),
-			messages:         make(chan []byte, 1),
+			messages:         make(chan engineio_v4.Frame, 1),
 			pollErrorBackoff: time.Second, // long, so the context cancel wins
 		}
 		client.reqCtx, client.pollCancel = context.WithCancel(ctx)
@@ -728,7 +728,7 @@ func TestPoll(t *testing.T) {
 		defer cancel()
 
 		// Create a buffered channel to avoid blocking
-		messagesChan := make(chan []byte, 1)
+		messagesChan := make(chan engineio_v4.Frame, 1)
 
 		client := &Transport{
 			log:        mockLogger,
@@ -784,7 +784,7 @@ func TestPoll(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		messagesChan := make(chan []byte, 1)
+		messagesChan := make(chan engineio_v4.Frame, 1)
 		client := &Transport{
 			log:        mockLogger,
 			httpClient: mockHTTPClient,
@@ -818,7 +818,7 @@ func TestPoll(t *testing.T) {
 			log:      mockLogger,
 			url:      &url.URL{Scheme: "http", Host: "example.com"},
 			ctx:      nil, // Intentionally set to nil to cause an error
-			messages: make(chan<- []byte),
+			messages: make(chan<- engineio_v4.Frame),
 		}
 
 		mockLogger.EXPECT().Debugf("run polling")
@@ -843,7 +843,7 @@ func TestPoll(t *testing.T) {
 			url:        &url.URL{Scheme: "http", Host: "example.com"},
 			sid:        "test-sid",
 			ctx:        context.Background(),
-			messages:   make(chan<- []byte),
+			messages:   make(chan<- engineio_v4.Frame),
 		}
 
 		mockLogger.EXPECT().Debugf("run polling")
@@ -874,7 +874,7 @@ func TestPoll(t *testing.T) {
 			url:        &url.URL{Scheme: "http", Host: "example.com"},
 			sid:        "test-sid",
 			ctx:        context.Background(),
-			messages:   make(chan<- []byte),
+			messages:   make(chan<- engineio_v4.Frame),
 		}
 
 		mockLogger.EXPECT().Debugf("run polling")
@@ -922,7 +922,7 @@ func TestPoll(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 
 		// Unbuffered channel: poll() must not block forever
-		messagesChan := make(chan []byte)
+		messagesChan := make(chan engineio_v4.Frame)
 
 		client := &Transport{
 			log:         mockLogger,
@@ -979,7 +979,7 @@ func TestPoll(t *testing.T) {
 			url:         &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
 			sid:         "test-sid",
 			ctx:         context.Background(),
-			messages:    make(chan []byte), // unbuffered: send will block
+			messages:    make(chan engineio_v4.Frame), // unbuffered: send will block
 			stopPooling: make(chan struct{}, 1),
 			stopCh:      stopCh,
 		}
@@ -1175,7 +1175,7 @@ func TestPollOversizedPayload(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		messagesChan := make(chan []byte, 1)
+		messagesChan := make(chan engineio_v4.Frame, 1)
 		maxPayloadSize := int64(100)
 		oversizedBody := strings.Repeat("x", 101)
 
@@ -1222,7 +1222,7 @@ func TestPollOversizedPayload(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		messagesChan := make(chan []byte, 1)
+		messagesChan := make(chan engineio_v4.Frame, 1)
 		maxPayloadSize := int64(100)
 		validBody := strings.Repeat("x", 50)
 
@@ -1276,7 +1276,7 @@ func TestPollOversizedPayload(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		messagesChan := make(chan []byte, 1)
+		messagesChan := make(chan engineio_v4.Frame, 1)
 		// Set maxPayloadSize to a value that would overflow when incremented
 		maxPayloadSize := int64(9223372036854775807) // math.MaxInt64
 
@@ -1336,7 +1336,7 @@ func TestRun_stopped_flag_reset(t *testing.T) {
 	defer cancel()
 
 	url, _ := url.Parse("http://example.com")
-	messagesChan := make(chan []byte, 1)
+	messagesChan := make(chan engineio_v4.Frame, 1)
 	onCloseChan := make(chan error, 1)
 
 	client := &Transport{
@@ -1489,7 +1489,7 @@ func TestRequestHandshake_StopWithCancelledContext(t *testing.T) {
 		httpClient:  mockHTTPClient,
 		url:         &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
 		ctx:         ctxCanceledDoneNever{Context: context.Background(), err: context.DeadlineExceeded},
-		messages:    make(chan []byte), // unbuffered: the send blocks
+		messages:    make(chan engineio_v4.Frame), // unbuffered: the send blocks
 		stopPooling: make(chan struct{}, 1),
 		stopCh:      stopCh,
 	}
@@ -1531,7 +1531,7 @@ func TestPollingLoop_StopDuringPoll(t *testing.T) {
 		pinger:      time.NewTicker(time.Millisecond),
 		url:         &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
 		ctx:         context.Background(),
-		messages:    make(chan []byte), // unbuffered: poll's send blocks
+		messages:    make(chan engineio_v4.Frame), // unbuffered: poll's send blocks
 		stopPooling: make(chan struct{}, 1),
 		stopCh:      stopCh,
 		onClose:     onClose,
@@ -1620,7 +1620,7 @@ func TestHandshakeGateUpgradeToPolling(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	onClose := make(chan error, 1)
-	err := transport.Run(ctx, &url.URL{Scheme: "http", Host: "localhost", Path: "/socket.io/"}, "known-sid", make(chan []byte, 1), onClose)
+	err := transport.Run(ctx, &url.URL{Scheme: "http", Host: "localhost", Path: "/socket.io/"}, "known-sid", make(chan engineio_v4.Frame, 1), onClose)
 	assert.NoError(t, err)
 
 	// pollingLoop must reach poll() instead of blocking on the gate.
@@ -1636,4 +1636,62 @@ func TestHandshakeGateUpgradeToPolling(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("expected onClose after Stop")
 	}
+}
+
+// TestSendBinary verifies that a binary attachment is POSTed as the engine.io
+// v4 base64 "b"-record, and that send errors surface.
+func TestSendBinary(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Successful binary send is base64 b-record", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHttpClient := mocks.NewMockHttpClient(ctrl)
+
+		transport := &Transport{
+			log:        mockLogger,
+			httpClient: mockHttpClient,
+			url:        &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			ctx:        context.Background(),
+		}
+
+		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+		mockResp := &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader("")),
+		}
+		// {1,2,3,4} base64-encodes to "AQIDBA==", prefixed with 'b'.
+		mockHttpClient.EXPECT().Do(gomock.Any()).DoAndReturn(func(req *http.Request) (*http.Response, error) {
+			body, _ := io.ReadAll(req.Body)
+			assert.Equal(t, "bAQIDBA==", string(body))
+			return mockResp, nil
+		})
+
+		err := transport.SendBinary([]byte{1, 2, 3, 4})
+		assert.NoError(t, err)
+	})
+
+	t.Run("Binary send error", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHttpClient := mocks.NewMockHttpClient(ctrl)
+
+		transport := &Transport{
+			log:        mockLogger,
+			httpClient: mockHttpClient,
+			url:        &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			ctx:        context.Background(),
+		}
+
+		mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+		mockHttpClient.EXPECT().Do(gomock.Any()).Return(nil, errors.New("send error"))
+
+		err := transport.SendBinary([]byte{1})
+		assert.Error(t, err)
+	})
 }
