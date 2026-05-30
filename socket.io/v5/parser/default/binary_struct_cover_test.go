@@ -209,8 +209,8 @@ func TestIsConvertibleTarget(t *testing.T) {
 	t.Parallel()
 	type s struct{}
 	assert.True(t, isConvertibleTarget(reflect.TypeOf(s{})))
-	assert.True(t, isConvertibleTarget(reflect.TypeOf(&s{})))         // pointer deref
-	assert.True(t, isConvertibleTarget(reflect.TypeOf((**s)(nil))))   // double pointer
+	assert.True(t, isConvertibleTarget(reflect.TypeOf(&s{})))       // pointer deref
+	assert.True(t, isConvertibleTarget(reflect.TypeOf((**s)(nil)))) // double pointer
 	assert.True(t, isConvertibleTarget(reflect.TypeOf(map[string]int{})))
 	assert.True(t, isConvertibleTarget(reflect.TypeOf([]int{})))
 	assert.True(t, isConvertibleTarget(reflect.TypeOf([2]int{})))

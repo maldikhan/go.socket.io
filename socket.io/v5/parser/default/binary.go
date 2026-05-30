@@ -177,12 +177,9 @@ func reflectHasBinary(rv reflect.Value, depth int) bool {
 		t := rv.Type()
 		for i := 0; i < t.NumField(); i++ {
 			field := t.Field(i)
-			if field.PkgPath != "" {
-				// Unexported field: skip, mirroring encoding/json.
-				continue
-			}
-			if jsonFieldName(field) == "" {
-				// Field tagged json:"-": not serialized, so not a carrier.
+			// Skip unexported fields and json:"-" fields, mirroring
+			// encoding/json: neither is serialized, so neither is a carrier.
+			if field.PkgPath != "" || jsonFieldName(field) == "" {
 				continue
 			}
 			if reflectHasBinary(rv.Field(i), depth-1) {
@@ -285,23 +282,24 @@ func placeholder(buf []byte, attachments *[][]byte) map[string]interface{} {
 // serializes it exactly as it normally would; only branches that carry binary
 // are rebuilt into map/slice forms with placeholders substituted.
 func reflectExtractBinary(rv reflect.Value, attachments *[][]byte, depth int) interface{} {
-	if !rv.IsValid() {
-		return nil
-	}
-	// If this subtree has no binary at all, hand the original value back so
-	// json.Marshal renders it verbatim (preserving Marshaler impls, tags, etc.).
+	// A subtree that carries no binary is handed back verbatim so json.Marshal
+	// renders it exactly as it normally would (preserving Marshaler impls, tags,
+	// etc.). This also absorbs invalid values, depth exhaustion, nil pointers and
+	// any non-rebuilt kind, so the switch below only handles binary-bearing
+	// composites and the byte leaf. reflectHasBinary already guards IsValid and
+	// nil. The walk only descends through exported, interfaceable positions, so
+	// rv.Interface() is always safe here.
 	if depth <= 0 || !reflectHasBinary(rv, depth) {
-		if rv.CanInterface() {
-			return rv.Interface()
+		if !rv.IsValid() {
+			return nil
 		}
-		return nil
+		return rv.Interface()
 	}
 
 	switch rv.Kind() {
 	case reflect.Interface, reflect.Ptr:
-		if rv.IsNil() {
-			return nil
-		}
+		// Non-nil here: a nil pointer/interface carries no binary and is handled
+		// by the verbatim fast path above.
 		return reflectExtractBinary(rv.Elem(), attachments, depth-1)
 	case reflect.Slice, reflect.Array:
 		if isByteSlice(rv) {
@@ -319,7 +317,7 @@ func reflectExtractBinary(rv reflect.Value, attachments *[][]byte, depth int) in
 			out[mapKeyString(iter.Key())] = reflectExtractBinary(iter.Value(), attachments, depth-1)
 		}
 		return out
-	case reflect.Struct:
+	default: // reflect.Struct: only structs reach here carrying binary.
 		out := make(map[string]interface{})
 		t := rv.Type()
 		for i := 0; i < t.NumField(); i++ {
@@ -338,11 +336,6 @@ func reflectExtractBinary(rv reflect.Value, attachments *[][]byte, depth int) in
 			out[name] = reflectExtractBinary(fv, attachments, depth-1)
 		}
 		return out
-	default:
-		if rv.CanInterface() {
-			return rv.Interface()
-		}
-		return nil
 	}
 }
 
