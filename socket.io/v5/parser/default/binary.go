@@ -4,9 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 
 	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
 )
+
+// maxBinaryScanDepth bounds the recursion of valueHasBinary so a pathological or
+// cyclic structure (e.g. a struct that points back at itself through a pointer or
+// interface) can never make HasBinary hang or overflow the stack. Real payloads
+// are far shallower than this, so the bound never trips for legitimate data.
+const maxBinaryScanDepth = 100
 
 // ErrParseBinary is returned when binary attachments cannot be reconciled with
 // the placeholders found in a PacketBinaryEvent/PacketBinaryAck payload.
@@ -126,9 +133,15 @@ func (p *SocketIOV5DefaultParser) HasBinary(event *socketio_v5.Event) bool {
 }
 
 // valueHasBinary reports whether a payload value contains any []byte, searching
-// nested slices and maps so binary buffers placed inside structures are found.
+// nested slices, maps AND struct fields (including through pointers and
+// interfaces) so binary buffers placed anywhere reachable inside a Go value are
+// found. This is what lets Emit("upload", struct{ File []byte }{...}) be encoded
+// as a real binary packet instead of base64-stringifying the bytes.
 func valueHasBinary(value interface{}) bool {
+	// Fast paths for the common, already-decoded shapes avoid the reflect cost.
 	switch v := value.(type) {
+	case nil:
+		return false
 	case []byte:
 		return true
 	case map[string]interface{}:
@@ -137,12 +150,73 @@ func valueHasBinary(value interface{}) bool {
 				return true
 			}
 		}
+		return false
 	case []interface{}:
 		for _, item := range v {
 			if valueHasBinary(item) {
 				return true
 			}
 		}
+		return false
+	}
+	return reflectHasBinary(reflect.ValueOf(value), maxBinaryScanDepth)
+}
+
+// reflectHasBinary walks an arbitrary reflect.Value looking for a []byte leaf.
+// depth bounds the recursion to guard against cyclic structures reached via
+// pointers/interfaces. A []byte is the binary leaf (Slice of Uint8); any other
+// slice/array is recursed into element by element.
+func reflectHasBinary(rv reflect.Value, depth int) bool {
+	if depth <= 0 || !rv.IsValid() {
+		return false
+	}
+
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Interface:
+		if rv.IsNil() {
+			return false
+		}
+		return reflectHasBinary(rv.Elem(), depth-1)
+	case reflect.Slice:
+		// []byte is the binary leaf; anything else is a slice to descend into.
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			return true
+		}
+		for i := 0; i < rv.Len(); i++ {
+			if reflectHasBinary(rv.Index(i), depth-1) {
+				return true
+			}
+		}
+		return false
+	case reflect.Array:
+		// A [N]byte array is not a Socket.IO binary attachment (only []byte is),
+		// so arrays are always descended into element by element.
+		for i := 0; i < rv.Len(); i++ {
+			if reflectHasBinary(rv.Index(i), depth-1) {
+				return true
+			}
+		}
+		return false
+	case reflect.Map:
+		for _, key := range rv.MapKeys() {
+			if reflectHasBinary(rv.MapIndex(key), depth-1) {
+				return true
+			}
+		}
+		return false
+	case reflect.Struct:
+		t := rv.Type()
+		for i := 0; i < rv.NumField(); i++ {
+			// Only exported fields are readable by reflect and marshalable by
+			// encoding/json; unexported fields can never become attachments.
+			if t.Field(i).PkgPath != "" {
+				continue
+			}
+			if reflectHasBinary(rv.Field(i), depth-1) {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }
@@ -150,7 +224,10 @@ func valueHasBinary(value interface{}) bool {
 // extractBinary walks a payload value and replaces every []byte with a
 // {"_placeholder":true,"num":N} marker, appending the buffer to *attachments in
 // the order encountered. The returned value is safe to JSON-marshal as the
-// binary event header. Nested slices and maps are traversed.
+// binary event header. Nested slices and maps are traversed; arbitrary structs,
+// pointers and typed containers are handled via reflection so binary inside a
+// Go struct (e.g. struct{ File []byte }) becomes a real attachment rather than
+// a base64 string.
 func extractBinary(value interface{}, attachments *[][]byte) interface{} {
 	switch v := value.(type) {
 	case []byte:
@@ -169,9 +246,114 @@ func extractBinary(value interface{}, attachments *[][]byte) interface{} {
 			out[i] = extractBinary(item, attachments)
 		}
 		return out
+	case nil:
+		return nil
 	default:
-		return value
+		return reflectExtractBinary(reflect.ValueOf(value), attachments, maxBinaryScanDepth)
 	}
+}
+
+// reflectExtractBinary mirrors extractBinary for arbitrary Go values reached via
+// reflection. It returns a JSON-marshalable tree (maps/slices/scalars) with every
+// []byte replaced by a placeholder and appended to *attachments. Values that
+// cannot contain binary (or once the depth bound is hit) are returned via their
+// interface{} so encoding/json serializes them normally. Only exported struct
+// fields are emitted, matching encoding/json and valueHasBinary.
+func reflectExtractBinary(rv reflect.Value, attachments *[][]byte, depth int) interface{} {
+	if !rv.IsValid() {
+		return nil
+	}
+	if depth <= 0 {
+		return rv.Interface()
+	}
+
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Interface:
+		if rv.IsNil() {
+			return rv.Interface()
+		}
+		return reflectExtractBinary(rv.Elem(), attachments, depth-1)
+	case reflect.Slice:
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			// []byte leaf -> attachment + placeholder.
+			buf := rv.Bytes()
+			num := len(*attachments)
+			*attachments = append(*attachments, buf)
+			return map[string]interface{}{"_placeholder": true, "num": num}
+		}
+		out := make([]interface{}, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			out[i] = reflectExtractBinary(rv.Index(i), attachments, depth-1)
+		}
+		return out
+	case reflect.Array:
+		out := make([]interface{}, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			out[i] = reflectExtractBinary(rv.Index(i), attachments, depth-1)
+		}
+		return out
+	case reflect.Map:
+		out := make(map[string]interface{}, rv.Len())
+		for _, key := range rv.MapKeys() {
+			out[mapKeyString(key)] = reflectExtractBinary(rv.MapIndex(key), attachments, depth-1)
+		}
+		return out
+	case reflect.Struct:
+		t := rv.Type()
+		out := make(map[string]interface{}, rv.NumField())
+		for i := 0; i < rv.NumField(); i++ {
+			field := t.Field(i)
+			if field.PkgPath != "" {
+				continue // unexported
+			}
+			name, omit := jsonFieldName(field)
+			if omit {
+				continue
+			}
+			out[name] = reflectExtractBinary(rv.Field(i), attachments, depth-1)
+		}
+		return out
+	default:
+		return rv.Interface()
+	}
+}
+
+// mapKeyString renders a map key as a JSON object key. encoding/json requires
+// map keys to be strings (or types implementing TextMarshaler / integer kinds);
+// fmt.Sprint reproduces the string and integer renderings json uses, which is
+// all that is needed to carry binary placeholders out of a typed map.
+func mapKeyString(key reflect.Value) string {
+	return fmt.Sprint(key.Interface())
+}
+
+// jsonFieldName returns the JSON object key for a struct field, honoring a
+// `json:"name,options"` tag. A `json:"-"` tag omits the field (the obscure
+// `json:"-,"` literal-dash form is not supported; it is vanishingly rare and not
+// needed for binary payloads). An empty tag name falls back to the field name.
+func jsonFieldName(field reflect.StructField) (string, bool) {
+	tag := field.Tag.Get("json")
+	if tag == "-" {
+		return "", true
+	}
+	name := tag
+	if comma := indexComma(tag); comma >= 0 {
+		name = tag[:comma]
+	}
+	if name == "" {
+		return field.Name, false
+	}
+	return name, false
+}
+
+// indexComma returns the index of the first comma in s, or -1. (Avoids pulling
+// in strings just for this; keeps the helper trivially Go 1.18 compatible.)
+func indexComma(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == ',' {
+			return i
+		}
+	}
+	return -1
 }
 
 // SerializeBinary encodes a message whose event payloads contain binary data as
