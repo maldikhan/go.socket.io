@@ -22,6 +22,12 @@ type Client struct {
 	log                 Logger
 	transport           Transport
 	supportedTransports map[engineio_v4.EngineIOTransport]Transport
+	// initialTransport is the transport the session started on, before any
+	// polling->websocket upgrade. It is captured once on the first connect and
+	// restored at the start of every reconnect attempt so a reconnect begins a
+	// fresh Engine.IO session on the original transport instead of reusing an
+	// upgraded websocket transport that carries a now-dead sid.
+	initialTransport    Transport
 	sid                 string
 	pingInterval        *time.Ticker
 	pingTimeout         time.Duration
@@ -43,6 +49,7 @@ type Client struct {
 	afterConnect        func()
 	messages            chan []byte
 	messagesDone        chan struct{} // closed when messageLoop exits
+	messagesStop        chan struct{} // closed to ask messageLoop to exit
 
 	// closing is set to 1 by Close() before the transport is stopped so the
 	// reconnect supervisor can distinguish an intentional shutdown from an
@@ -95,6 +102,14 @@ func (c *Client) Connect(ctx context.Context) error {
 	// Mark the client as live so that an unexpected transport drop triggers a
 	// reconnect rather than being mistaken for an intentional Close.
 	atomic.StoreUint32(&c.closing, 0)
+	// Capture the initial (pre-upgrade) transport once so that reconnects can
+	// always start a fresh session on it. Connect is the only entry point that
+	// runs before any upgrade, so c.transport is still the initial transport here.
+	c.transportMu.Lock()
+	if c.initialTransport == nil {
+		c.initialTransport = c.transport
+	}
+	c.transportMu.Unlock()
 	return c.startConnection(ctx)
 }
 
@@ -106,12 +121,27 @@ func (c *Client) Connect(ctx context.Context) error {
 // stale, already-closed channel or a fired sync.Once would deadlock or
 // double-close on a reconnect.
 func (c *Client) startConnection(ctx context.Context) error {
-	// Snapshot the transport under the lock. Close() sets it to nil; if a
-	// reconnect attempt races with Close() we must bail out instead of
+	// Tear down any message loop left running by a previous cycle before we
+	// replace its channels below. On a fresh connect there is nothing running,
+	// so this is a no-op; on a reconnect it stops the goroutine that was still
+	// reading the now-dead transport's messages channel, preventing a leak.
+	c.stopMessageLoop()
+
+	// Restore the initial transport and clear the stale sid so the cycle starts
+	// a brand-new Engine.IO session with a real handshake. On the first connect
+	// the transport is already the initial one and the sid is already empty, so
+	// this is a no-op; after a polling->websocket upgrade it reverts the upgraded
+	// websocket transport (whose RequestHandshake is a no-op) back to the polling
+	// transport that performs a real handshake. Close() sets the transport to nil;
+	// if a reconnect attempt races with Close() we must bail out instead of
 	// dereferencing a nil transport.
-	c.transportMu.RLock()
+	c.transportMu.Lock()
+	if c.initialTransport != nil {
+		c.transport = c.initialTransport
+	}
+	c.sid = ""
 	transport := c.transport
-	c.transportMu.RUnlock()
+	c.transportMu.Unlock()
 	if transport == nil {
 		return errClientClosed
 	}
@@ -148,9 +178,13 @@ func (c *Client) startConnection(ctx context.Context) error {
 	// owns this cycle's channels and never races with a later reconnect cycle
 	// that reassigns the c.messages / c.messagesDone fields.
 	messagesDone := make(chan struct{})
+	messagesStop := make(chan struct{})
 	messages := c.messages
+	c.transportMu.Lock()
 	c.messagesDone = messagesDone
-	go c.messageLoop(ctx, messages, messagesDone)
+	c.messagesStop = messagesStop
+	c.transportMu.Unlock()
+	go c.messageLoop(ctx, messages, messagesDone, messagesStop)
 
 	c.transportMu.Lock()
 	c.hadHandshake = sync.Once{}
@@ -159,14 +193,15 @@ func (c *Client) startConnection(ctx context.Context) error {
 
 	err = transport.RequestHandshake()
 	if err != nil {
-		// Clean up: stop transport and wait for the message loop to exit
-		// so we don't leak a goroutine.
+		// Clean up: stop transport and wait for the message loop to exit so we
+		// don't leak a goroutine. The cleanup operates on the channels captured
+		// for this cycle so it is unaffected by a later reconnect cycle.
 		_ = transport.Stop()
 		if c.transportClosed != nil {
 			<-c.transportClosed
 		}
-		close(c.messages)
-		<-c.messagesDone
+		close(messages)
+		<-messagesDone
 		close(c.supervisorDone)
 		return err
 	}
@@ -174,7 +209,7 @@ func (c *Client) startConnection(ctx context.Context) error {
 	return nil
 }
 
-func (c *Client) messageLoop(ctx context.Context, messages <-chan []byte, messagesDone chan struct{}) {
+func (c *Client) messageLoop(ctx context.Context, messages <-chan []byte, messagesDone chan struct{}, stop <-chan struct{}) {
 	if messagesDone != nil {
 		defer close(messagesDone)
 	}
@@ -192,10 +227,45 @@ func (c *Client) messageLoop(ctx context.Context, messages <-chan []byte, messag
 			if err != nil {
 				c.log.Errorf("handle packet error: %s", err)
 			}
+		case <-stop:
+			// A new connection cycle asked this loop to exit so it can take over
+			// with fresh channels (reconnect teardown).
+			return
 		case <-ctx.Done():
 			c.log.Warnf("context done, engine.io client stopped processing messages")
 			return
 		}
+	}
+}
+
+// stopMessageLoop signals the current cycle's messageLoop to exit and waits for
+// it to finish. It is idempotent and safe to call when no loop is running: a nil
+// stop channel means there is nothing to stop, and a stop channel that was
+// already closed is left untouched (a non-blocking receive detects the closed
+// state). The dropped transport has already stopped, so it will not write to the
+// old messages channel after this point; we therefore tear the loop down via the
+// dedicated stop signal rather than closing the messages channel here, leaving
+// that channel for Close() to close exactly once.
+func (c *Client) stopMessageLoop() {
+	c.transportMu.Lock()
+	stop := c.messagesStop
+	done := c.messagesDone
+	c.messagesStop = nil
+	c.messagesDone = nil
+	c.transportMu.Unlock()
+
+	if stop == nil {
+		return
+	}
+	// Close the stop channel unless a previous call already did. A non-blocking
+	// receive that succeeds means the channel is already closed.
+	select {
+	case <-stop:
+	default:
+		close(stop)
+	}
+	if done != nil {
+		<-done
 	}
 }
 

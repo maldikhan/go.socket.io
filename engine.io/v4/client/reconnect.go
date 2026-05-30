@@ -105,6 +105,14 @@ func (c *Client) reconnectLoop(cause error) {
 	backoff := base
 	maxBackoff := base * 8
 
+	// ctxDone is nil when no run context was assigned (defensive: the normal
+	// Connect path always sets one). A receive on a nil channel blocks forever,
+	// so the wait select simply falls through to the backoff timer in that case.
+	var ctxDone <-chan struct{}
+	if c.ctx != nil {
+		ctxDone = c.ctx.Done()
+	}
+
 	for attempt := 1; attempt <= c.reconnectAttempts; attempt++ {
 		// Respect cancellation/close before waiting and retrying.
 		if c.stopRequested() {
@@ -113,7 +121,7 @@ func (c *Client) reconnectLoop(cause error) {
 
 		select {
 		case <-time.After(backoff):
-		case <-c.ctx.Done():
+		case <-ctxDone:
 			return
 		}
 
@@ -153,6 +161,11 @@ func (c *Client) reconnectLoop(cause error) {
 func (c *Client) stopRequested() bool {
 	if atomic.LoadUint32(&c.closing) == 1 {
 		return true
+	}
+	// A nil run context (never assigned) is treated as "not cancelled" so the
+	// loop does not dereference a nil context. supervise applies the same guard.
+	if c.ctx == nil {
+		return false
 	}
 	select {
 	case <-c.ctx.Done():
