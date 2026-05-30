@@ -69,6 +69,13 @@ type Client struct {
 	// transportClosed directly, because the supervisor owns that channel.
 	supervisorDone chan struct{}
 
+	// closeCh is closed exactly once by Close() to wake any goroutine parked in
+	// the reconnect backoff wait, so Close() returns promptly instead of blocking
+	// for the remaining backoff (which can be many seconds with WithReconnectWait).
+	// closeOnce guards the close so concurrent Close() calls never double-close it.
+	closeCh   chan struct{}
+	closeOnce sync.Once
+
 	// transportMu serializes access to the transport field and
 	// the waitUpgrade / waitHandshake channels so that Send() never
 	// races with transportUpgrade() or Close().
@@ -541,6 +548,15 @@ func (c *Client) Close() error {
 	// the reconnect supervisor treats the resulting drop as a graceful shutdown
 	// and does not attempt to reconnect.
 	atomic.StoreUint32(&c.closing, 1)
+
+	// Wake any goroutine parked in the reconnect backoff wait so Close() does not
+	// block for the remaining backoff. Guarded by closeOnce so concurrent Close()
+	// calls (or a Close() racing with reconnect exhaustion) never double-close it.
+	// closeCh is nil only for Clients built directly in tests without NewClient;
+	// guarding here keeps Close() safe in that case too.
+	if c.closeCh != nil {
+		c.closeOnce.Do(func() { close(c.closeCh) })
+	}
 
 	// Write-lock to prevent new Send() calls from acquiring the transport
 	// while we are tearing it down. Setting transport to nil ensures that

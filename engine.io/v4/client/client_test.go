@@ -161,7 +161,7 @@ func TestClient_messageLoop(t *testing.T) {
 	t.Run("Handle packet", func(t *testing.T) {
 		mockParser.EXPECT().Parse([]byte("test")).Return(&engineio_v4.Message{Type: engineio_v4.PacketMessage}, nil)
 
-		go client.messageLoop(ctx, client.messages, nil)
+		go client.messageLoop(ctx, client.messages, nil, nil)
 		client.messages <- []byte("test")
 		time.Sleep(10 * time.Millisecond)
 	})
@@ -170,7 +170,7 @@ func TestClient_messageLoop(t *testing.T) {
 		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).Times(2)
 		mockParser.EXPECT().Parse([]byte("error")).Return(nil, errors.New("parse error"))
 
-		go client.messageLoop(ctx, client.messages, nil)
+		go client.messageLoop(ctx, client.messages, nil, nil)
 		client.messages <- []byte("error")
 		time.Sleep(10 * time.Millisecond)
 	})
@@ -178,14 +178,14 @@ func TestClient_messageLoop(t *testing.T) {
 	t.Run("Context done", func(t *testing.T) {
 		mockLogger.EXPECT().Warnf("context done, engine.io client stopped processing messages").AnyTimes()
 		messages := make(chan []byte, 1)
-		go client.messageLoop(ctx, messages, nil)
+		go client.messageLoop(ctx, messages, nil, nil)
 		cancel()
 		time.Sleep(10 * time.Millisecond)
 	})
 
 	t.Run("NIL messages channel", func(t *testing.T) {
 		mockLogger.EXPECT().Errorf("messages channel is nil, can't read transport messages")
-		client.messageLoop(ctx, nil, nil)
+		client.messageLoop(ctx, nil, nil, nil)
 	})
 }
 

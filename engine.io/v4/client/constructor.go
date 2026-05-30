@@ -29,7 +29,9 @@ func NewClient(options ...EngineClientOption) (*Client, error) {
 		pingInterval:    time.NewTicker(10 * time.Second),
 		stopPooling:     make(chan struct{}, 1),
 		transportClosed: make(chan error, 1),
-		redactPayload:   true, // production-safe default; WithDebugPayload(true) opts out
+		// closeCh is closed by Close() to wake the reconnect backoff wait promptly.
+		closeCh:       make(chan struct{}),
+		redactPayload: true, // production-safe default; WithDebugPayload(true) opts out
 	}
 
 	for _, opt := range options {

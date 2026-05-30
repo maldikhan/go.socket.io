@@ -65,13 +65,66 @@ func TestConstructorRegistersReconnectHandlers(t *testing.T) {
 	}
 }
 
-// TestReconnectResendsConnectAndEmits verifies that the engine "reconnect" event
-// (1) re-sends the socket.io CONNECT packet so the namespace re-joins, and
-// (2) emits the socket.io-level "reconnect" event to user handlers.
-func TestReconnectResendsConnectAndEmits(t *testing.T) {
+// TestExactlyOneConnectPerReconnect is the issue-A regression test. A real
+// engine.io reconnect performs a fresh handshake, which fires the engine-level
+// "connect" event and re-sends the socket.io CONNECT packet exactly once. The
+// engine-level "reconnect" event must NOT send a second CONNECT, otherwise two
+// CONNECT packets would be emitted for the same namespace per reconnect. This
+// test counts the CONNECT packets the client serializes and asserts exactly one
+// per (re)connect cycle.
+func TestExactlyOneConnectPerReconnect(t *testing.T) {
+	_, handlers, mockEngine, mockParser := captureEngineHandlers(t)
+
+	var mu sync.Mutex
+	connectCount := 0
+	mockParser.EXPECT().Serialize(gomock.Any()).DoAndReturn(func(msg *socketio_v5.Message) ([]byte, error) {
+		mu.Lock()
+		if msg.Type == socketio_v5.PacketConnect {
+			connectCount++
+		}
+		mu.Unlock()
+		return []byte("0"), nil
+	}).AnyTimes()
+	mockEngine.EXPECT().Send(gomock.Any()).Return(nil).AnyTimes()
+	mockParser.EXPECT().WrapCallback(gomock.Any()).DoAndReturn(passthroughWrap).AnyTimes()
+
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return connectCount
+	}
+
+	connectH := handlers["connect"]
+	reconnectH := handlers["reconnect"]
+	require.NotNil(t, connectH, "engine.io \"connect\" handler must be registered")
+	require.NotNil(t, reconnectH, "engine.io \"reconnect\" handler must be registered")
+
+	// Initial connect handshake: exactly one CONNECT.
+	connectH(nil)
+	assert.Equal(t, 1, count(), "initial connect must send exactly one CONNECT")
+
+	// A real reconnect: the fresh handshake fires "connect" (sending the single
+	// CONNECT), then the engine fires "reconnect". The "reconnect" handler must
+	// not add a second CONNECT for this cycle.
+	connectH(nil)
+	reconnectH(nil)
+	assert.Equal(t, 2, count(),
+		"each (re)connect must send exactly one CONNECT; \"reconnect\" must not duplicate it")
+
+	// A second reconnect cycle: again exactly one more CONNECT.
+	connectH(nil)
+	reconnectH(nil)
+	assert.Equal(t, 3, count(),
+		"each (re)connect must send exactly one CONNECT; \"reconnect\" must not duplicate it")
+}
+
+// TestReconnectEmitsButDoesNotResendConnect verifies that the engine "reconnect"
+// event surfaces the socket.io-level "reconnect" event to user handlers WITHOUT
+// serializing its own CONNECT packet (the fresh handshake's "connect" event owns
+// that — see issue A).
+func TestReconnectEmitsButDoesNotResendConnect(t *testing.T) {
 	client, handlers, mockEngine, mockParser := captureEngineHandlers(t)
 
-	// connectSocketIO serializes a CONNECT packet and sends it over the engine.
 	var mu sync.Mutex
 	var sentConnect bool
 	mockParser.EXPECT().Serialize(gomock.Any()).DoAndReturn(func(msg *socketio_v5.Message) ([]byte, error) {
@@ -98,7 +151,7 @@ func TestReconnectResendsConnectAndEmits(t *testing.T) {
 	}
 
 	mu.Lock()
-	assert.True(t, sentConnect, "reconnect must re-send the CONNECT packet")
+	assert.False(t, sentConnect, "the \"reconnect\" handler must not re-send CONNECT on its own")
 	mu.Unlock()
 }
 

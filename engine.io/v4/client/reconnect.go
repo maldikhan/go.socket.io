@@ -113,6 +113,12 @@ func (c *Client) reconnectLoop(cause error) {
 		ctxDone = c.ctx.Done()
 	}
 
+	// closeCh is closed by Close() to wake this backoff wait immediately instead
+	// of blocking for the remaining (possibly multi-second) backoff duration. It
+	// is nil only in tests that build a Client without NewClient; a receive on a
+	// nil channel blocks forever, so the wait simply falls back to the timer/ctx.
+	closeCh := c.closeCh
+
 	for attempt := 1; attempt <= c.reconnectAttempts; attempt++ {
 		// Respect cancellation/close before waiting and retrying.
 		if c.stopRequested() {
@@ -122,6 +128,9 @@ func (c *Client) reconnectLoop(cause error) {
 		select {
 		case <-time.After(backoff):
 		case <-ctxDone:
+			return
+		case <-closeCh:
+			// Close() was called during the backoff wait; stop promptly.
 			return
 		}
 
