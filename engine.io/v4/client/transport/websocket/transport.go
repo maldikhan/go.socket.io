@@ -133,7 +133,10 @@ func (c *Transport) connectWebSocket() error {
 		if err != nil {
 			c.log.Errorf("wsClose: %s", err)
 		}
-		// TODO: Reconnect
+		// Reconnection is handled at the engine.io Client level: wsReadLoop
+		// reports the drop (with its error) via onClose, and the client's
+		// reconnect supervisor performs a fresh handshake / transport
+		// re-selection. The transport intentionally does not reconnect itself.
 	}()
 
 	return nil

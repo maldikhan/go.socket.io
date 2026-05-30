@@ -173,7 +173,9 @@ func (c *Transport) Run(
 		if err != nil {
 			c.log.Errorf("pollingLoop error: %s", err)
 		}
-		// TODO: reconnect
+		// Reconnection is handled at the engine.io Client level: finishPolling
+		// reports the drop via onClose, and the client's reconnect supervisor
+		// performs a fresh handshake. The transport does not reconnect itself.
 	}()
 
 	return nil

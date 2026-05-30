@@ -22,10 +22,16 @@ func NewClient(options ...EngineClientOption) (*Client, error) {
 		parser:            &engineio_v4_parser.EngineIOV4Parser{},
 		reconnectAttempts: 5,
 		reconnectWait:     5 * time.Second,
-		pingInterval:      time.NewTicker(10 * time.Second),
-		stopPooling:       make(chan struct{}, 1),
-		transportClosed:   make(chan error, 1),
-		redactPayload:     true, // production-safe default; WithDebugPayload(true) opts out
+		// Reconnection is enabled by default to match the behaviour of the
+		// reference JavaScript client. WithReconnect(false) restores the
+		// pre-reconnect behaviour (the client stops on the first drop).
+		reconnect:       true,
+		pingInterval:    time.NewTicker(10 * time.Second),
+		stopPooling:     make(chan struct{}, 1),
+		transportClosed: make(chan error, 1),
+		// closeCh is closed by Close() to wake the reconnect backoff wait promptly.
+		closeCh:       make(chan struct{}),
+		redactPayload: true, // production-safe default; WithDebugPayload(true) opts out
 	}
 
 	for _, opt := range options {
@@ -151,6 +157,46 @@ func WithReconnectAttempts(attempts int) EngineClientOption {
 func WithReconnectWait(wait time.Duration) EngineClientOption {
 	return func(c *Client) error {
 		c.reconnectWait = wait
+		return nil
+	}
+}
+
+// WithReconnect enables or disables automatic reconnection with exponential
+// backoff. It is enabled by default; passing false makes the client stop on the
+// first unexpected transport drop, exactly as it behaved before reconnection
+// was added.
+func WithReconnect(enabled bool) EngineClientOption {
+	return func(c *Client) error {
+		c.reconnect = enabled
+		return nil
+	}
+}
+
+// WithOnReconnecting registers a hook fired when an unexpected drop is detected
+// and the client begins its reconnect attempts. Equivalent to
+// On("reconnecting", ...).
+func WithOnReconnecting(handler func()) EngineClientOption {
+	return func(c *Client) error {
+		c.reconnectingHandler = handler
+		return nil
+	}
+}
+
+// WithOnReconnect registers a hook fired after the client successfully
+// re-establishes the connection. Equivalent to On("reconnect", ...).
+func WithOnReconnect(handler func()) EngineClientOption {
+	return func(c *Client) error {
+		c.reconnectHandler = handler
+		return nil
+	}
+}
+
+// WithOnReconnectFailed registers a hook fired when all reconnect attempts are
+// exhausted (the client is then closed). Equivalent to
+// On("reconnect_failed", ...).
+func WithOnReconnectFailed(handler func()) EngineClientOption {
+	return func(c *Client) error {
+		c.reconnectFailedHand = handler
 		return nil
 	}
 }
