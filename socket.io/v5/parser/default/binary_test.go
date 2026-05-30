@@ -51,6 +51,85 @@ func TestParser_WrapCallback_Binary(t *testing.T) {
 		cb([]interface{}{[]byte("data")})
 		assert.False(t, called, "binary payload must not bind to a string parameter")
 	})
+
+	t.Run("malformed json raw message is rejected", func(t *testing.T) {
+		called := false
+		cb := p.WrapCallback(func(n int) { called = true })
+		require.NotNil(t, cb)
+		// A json.RawMessage that cannot unmarshal into the parameter type must
+		// take the json.Unmarshal error path and not invoke the handler.
+		cb([]interface{}{json.RawMessage(`"not-an-int"`)})
+		assert.False(t, called, "malformed json must not invoke the handler")
+	})
+}
+
+// TestParser_WrapCallback_NestedBinary verifies that a typed handler receives
+// an already-decoded value (a map[string]interface{} / []interface{} produced
+// by binary attachment reconstruction) that contains []byte at a nested
+// position. Such values arrive as concrete Go types (not json.RawMessage), so
+// WrapCallback must assign them to the handler parameter directly rather than
+// attempting json.Unmarshal. Previously these only worked via OnAny.
+func TestParser_WrapCallback_NestedBinary(t *testing.T) {
+	t.Parallel()
+	p := newBinaryParser()
+
+	binData := []byte{0x01, 0x02, 0x03, 0x04}
+
+	t.Run("map with nested binary fires typed handler", func(t *testing.T) {
+		called := false
+		var got map[string]interface{}
+		cb := p.WrapCallback(func(m map[string]interface{}) {
+			called = true
+			got = m
+		})
+		require.NotNil(t, cb)
+
+		// Reconstructed payload: a decoded map containing []byte at a key.
+		payload := map[string]interface{}{
+			"name": "avatar",
+			"file": binData,
+		}
+		cb([]interface{}{payload})
+
+		require.True(t, called, "typed handler must fire for nested-binary map")
+		raw, ok := got["file"].([]byte)
+		require.True(t, ok, "expected []byte at key file")
+		assert.Equal(t, binData, raw)
+	})
+
+	t.Run("map containing nested binary slice fires typed handler", func(t *testing.T) {
+		called := false
+		var got map[string]interface{}
+		cb := p.WrapCallback(func(m map[string]interface{}) {
+			called = true
+			got = m
+		})
+		require.NotNil(t, cb)
+
+		// Reconstructed payload: a decoded map whose value is a slice that
+		// contains []byte at an index.
+		payload := map[string]interface{}{
+			"items": []interface{}{"first", binData},
+		}
+		cb([]interface{}{payload})
+
+		require.True(t, called, "typed handler must fire for nested-binary slice")
+		items, ok := got["items"].([]interface{})
+		require.True(t, ok, "expected []interface{} at key items")
+		require.Len(t, items, 2)
+		raw, ok := items[1].([]byte)
+		require.True(t, ok, "expected []byte at index 1")
+		assert.Equal(t, binData, raw)
+	})
+
+	t.Run("decoded value not assignable to param is rejected", func(t *testing.T) {
+		called := false
+		// A decoded map cannot be assigned to an int parameter.
+		cb := p.WrapCallback(func(n int) { called = true })
+		require.NotNil(t, cb)
+		cb([]interface{}{map[string]interface{}{"a": []byte{1}}})
+		assert.False(t, called, "non-assignable decoded value must be rejected")
+	})
 }
 
 func TestParser_HasBinary(t *testing.T) {

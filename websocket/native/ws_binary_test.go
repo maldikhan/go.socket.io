@@ -81,11 +81,12 @@ func TestWebSocketConnection_ReceiveFrame_Error(t *testing.T) {
 
 	conn := &WebSocketConnection{}
 	require.NoError(t, conn.Dial(context.Background(), u, origin))
-	defer conn.Close() //nolint:errcheck
+	defer closeServer()
 
-	// Close the server so the next ReceiveFrame on the still-open connection
-	// fails inside codec.Receive (exercising the error path, not the nil guard).
-	closeServer()
+	// Close the client connection, then attempt to receive. The read fails
+	// inside codec.Receive on the closed connection, exercising the error path
+	// (not the nil guard) without blocking on a frame that never arrives.
+	require.NoError(t, conn.Close())
 
 	var received []byte
 	_, err = conn.ReceiveFrame(&received)

@@ -34,12 +34,17 @@ func (p *SocketIOV5DefaultParser) WrapCallback(callback interface{}) func(in []i
 		for i := 0; i < callbackType.NumIn(); i++ {
 			argType := callbackType.In(i)
 
-			// Reconstructed binary attachments arrive as []byte rather than
-			// json.RawMessage. When the callback parameter is []byte, pass the
-			// raw bytes straight through instead of JSON-unmarshaling them.
-			if raw, isBytes := in[i].([]byte); isBytes {
-				if argType == reflect.TypeOf([]byte(nil)) {
-					args[i] = reflect.ValueOf(raw)
+			// Values that are not json.RawMessage are already-decoded Go values
+			// produced by binary attachment reconstruction (e.g. a []byte for a
+			// top-level binary, or a map[string]interface{} / []interface{} that
+			// contains []byte at a nested position). They cannot be JSON
+			// unmarshaled, so assign them to the callback parameter directly via
+			// reflection when the concrete type is assignable.
+			data, isRaw := in[i].(json.RawMessage)
+			if !isRaw {
+				argValueOf := reflect.ValueOf(in[i])
+				if argValueOf.IsValid() && argValueOf.Type().AssignableTo(argType) {
+					args[i] = argValueOf
 					continue
 				}
 				p.logger.Errorf("Wrong data in %d json entity", i)
@@ -47,11 +52,6 @@ func (p *SocketIOV5DefaultParser) WrapCallback(callback interface{}) func(in []i
 			}
 
 			argValue := reflect.New(argType).Interface()
-			data, ok := in[i].(json.RawMessage)
-			if !ok {
-				p.logger.Errorf("Wrong data in %d json entity", i)
-				return
-			}
 			if err := json.Unmarshal(data, argValue); err != nil {
 				p.logger.Errorf("Error unmarshaling argument %d (%v): %v\n", i, in[i], err)
 				return
