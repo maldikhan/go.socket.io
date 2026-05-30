@@ -26,7 +26,6 @@ services:
     environment:
       PORT: "3001"
       ALLOW_UPGRADES: "false"
-      PING_INTERVAL: "500"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3001/socket.io/?EIO=4&transport=polling"]
       interval: 2s

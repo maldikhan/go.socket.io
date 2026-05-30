@@ -11,8 +11,7 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 // polling-only client is never offered a websocket upgrade. This is used by
 // the dedicated polling-only test instance.
 const ALLOW_UPGRADES = (process.env.ALLOW_UPGRADES || 'true') !== 'false';
-// The Go polling transport fetches data once per ping interval, so a short
-// interval keeps server->client latency low for the polling-only test.
+// Server keepalive ping interval; defaults to the Socket.IO default (25s).
 const PING_INTERVAL = parseInt(process.env.PING_INTERVAL || '25000', 10);
 
 const io = new Server(PORT, {

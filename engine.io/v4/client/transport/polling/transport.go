@@ -37,6 +37,20 @@ type Transport struct {
 	onClose     chan<- error
 	stopPooling chan struct{}
 
+	// reqCtx scopes the in-flight poll/handshake HTTP request. It is derived
+	// from the run context in Run() and cancelled by Stop(), so Stop() can
+	// interrupt a long-poll GET that the server is holding open (e.g. during a
+	// polling->websocket upgrade) instead of waiting up to one ping interval.
+	reqCtx     context.Context
+	pollCancel context.CancelFunc
+
+	// handshakeDone is closed by SetHandshake once the engine.io handshake has
+	// assigned a session id. The continuous polling loop waits on it so it never
+	// issues a GET while RequestHandshake()'s own poll is in flight — engine.io
+	// rejects two concurrent polls on the same session.
+	handshakeDone chan struct{}
+	handshakeOnce sync.Once
+
 	// stopCh is closed by Stop() to broadcast the stop signal to any goroutine
 	// currently blocked inside poll(). Using a closed channel (instead of a
 	// buffered send) means both poll() and pollingLoop can observe the stop
@@ -46,6 +60,10 @@ type Transport struct {
 
 	stopped        uint32 // atomic; 0 = running, 1 = stopped
 	maxPayloadSize int64
+
+	// pollErrorBackoff is the pause after a failed poll before retrying, so a
+	// persistently failing server does not turn the loop into a hot spin.
+	pollErrorBackoff time.Duration
 
 	// mu guards the sid field, which is written by SetHandshake()/Run() and
 	// read by buildHttpUrl() from the polling goroutine.
@@ -73,6 +91,10 @@ func (c *Transport) SetHandshake(handshake *engineio_v4.HandshakeResponse) {
 		pingInterval = time.Duration(handshake.PingInterval) * time.Millisecond
 	}
 	c.pinger.Reset(pingInterval)
+	// Release the polling loop now that a session id is available.
+	if c.handshakeDone != nil {
+		c.handshakeOnce.Do(func() { close(c.handshakeDone) })
+	}
 }
 
 func (c *Transport) RequestHandshake() error {
@@ -101,6 +123,9 @@ func (c *Transport) Run(
 	onClose chan<- error,
 ) error {
 	c.ctx = ctx
+	// Derive a request-scoped context that Stop() can cancel independently of
+	// the parent context, so an in-flight long-poll can be interrupted promptly.
+	c.reqCtx, c.pollCancel = context.WithCancel(ctx)
 	c.mu.Lock()
 	c.sid = sid
 	c.mu.Unlock()
@@ -109,6 +134,9 @@ func (c *Transport) Run(
 	c.onClose = onClose
 	// Reset the stop state so the transport can be safely reused after a Stop().
 	atomic.StoreUint32(&c.stopped, 0)
+	// Fresh handshake gate for this run.
+	c.handshakeDone = make(chan struct{})
+	c.handshakeOnce = sync.Once{}
 	// Reinitialize stopPooling channel to ensure fresh channel for new run.
 	c.stopPooling = make(chan struct{}, 1)
 	// Reinitialize the stop broadcast channel and its sync.Once as well —
@@ -136,9 +164,13 @@ func (c *Transport) Stop() error {
 		return nil
 	}
 	// Close stopCh to broadcast the stop signal to any poll() call that is
-	// currently blocked sending to c.messages. sync.Once guarantees we only
-	// close once even if Stop() is called from multiple goroutines.
+	// currently blocked sending to c.messages, and cancel reqCtx to interrupt a
+	// poll that is blocked waiting for the server's long-poll response. sync.Once
+	// guarantees we only do this once even if Stop() is called concurrently.
 	c.stopOnce.Do(func() {
+		if c.pollCancel != nil {
+			c.pollCancel()
+		}
 		close(c.stopCh)
 	})
 	// Non-blocking send: if pollingLoop already exited (e.g. via
@@ -151,42 +183,82 @@ func (c *Transport) Stop() error {
 	return nil
 }
 
+// defaultPollErrorBackoff is the default pause after a failed poll before
+// retrying (see Transport.pollErrorBackoff).
+const defaultPollErrorBackoff = time.Second
+
+// pollingLoop continuously long-polls the server. Each poll() issues a GET that
+// the server holds open until it has data (or sends a keepalive ping), then the
+// loop immediately issues the next one. This keeps server->client latency low,
+// independent of the ping interval; a successful poll returns quickly when data
+// is queued and otherwise blocks until the server responds.
 func (c *Transport) pollingLoop() error {
-	for {
+	// Wait for the handshake to assign a session id before polling. Polling
+	// earlier would race RequestHandshake()'s poll and trigger a concurrent-poll
+	// rejection from the server. A nil gate (transport driven without Run, e.g.
+	// in unit tests) means "already handshaked".
+	if c.handshakeDone != nil {
 		select {
-		case _, ok := <-c.pinger.C:
-			if !ok {
-				c.log.Warnf("pinger closed: stop pooling")
-				return errors.New("pinger closed")
-			}
-			err := c.poll()
-			if errors.Is(err, errTransportStopped) {
-				c.log.Debugf("stop polling")
-				atomic.StoreUint32(&c.stopped, 1)
-				if c.onClose != nil {
-					c.onClose <- c.ctx.Err()
-				}
-				return nil
-			}
-			if err != nil {
-				c.log.Errorf("poll error: %s", err)
-			}
+		case <-c.handshakeDone:
 		case <-c.stopPooling:
-			c.log.Debugf("stop polling")
-			atomic.StoreUint32(&c.stopped, 1)
-			if c.onClose != nil {
-				c.onClose <- c.ctx.Err()
-			}
-			return nil
+			return c.finishPolling(true, nil)
 		case <-c.ctx.Done():
-			c.log.Debugf("context done, stop http polling")
-			atomic.StoreUint32(&c.stopped, 1)
-			if c.onClose != nil {
-				c.onClose <- c.ctx.Err()
-			}
-			return c.ctx.Err()
+			return c.finishPolling(false, c.ctx.Err())
 		}
 	}
+
+	for {
+		// Honor a stop/cancel requested between polls before issuing a new GET.
+		select {
+		case <-c.stopPooling:
+			return c.finishPolling(true, nil)
+		case <-c.ctx.Done():
+			return c.finishPolling(false, c.ctx.Err())
+		default:
+		}
+
+		err := c.poll()
+		if errors.Is(err, errTransportStopped) {
+			return c.finishPolling(true, nil)
+		}
+		if err != nil {
+			// A request cancelled by Stop() (reqCtx) or by the parent context is
+			// a normal shutdown, not a transport error.
+			if atomic.LoadUint32(&c.stopped) == 1 {
+				return c.finishPolling(true, nil)
+			}
+			if c.ctx.Err() != nil {
+				return c.finishPolling(false, c.ctx.Err())
+			}
+			// Genuine transient error (network blip, server hiccup): log and back
+			// off briefly, but stay responsive to stop/cancel during the pause.
+			c.log.Errorf("poll error: %s", err)
+			select {
+			case <-time.After(c.pollErrorBackoff):
+			case <-c.stopPooling:
+				return c.finishPolling(true, nil)
+			case <-c.ctx.Done():
+				return c.finishPolling(false, c.ctx.Err())
+			}
+		}
+	}
+}
+
+// finishPolling performs the shared loop teardown: it marks the transport
+// stopped and notifies the engine client (onClose always carries the run
+// context's error — nil for an upgrade/Stop-driven exit, the cancellation cause
+// for a context shutdown). stopRequested selects the matching debug log.
+func (c *Transport) finishPolling(stopRequested bool, ret error) error {
+	if stopRequested {
+		c.log.Debugf("stop polling")
+	} else {
+		c.log.Debugf("context done, stop http polling")
+	}
+	atomic.StoreUint32(&c.stopped, 1)
+	if c.onClose != nil {
+		c.onClose <- c.ctx.Err()
+	}
+	return ret
 }
 
 func (c *Transport) buildHttpUrl() *url.URL {
@@ -218,7 +290,14 @@ func (c *Transport) poll() error {
 		return errors.New("messages channel is nil")
 	}
 
-	req, err := http.NewRequestWithContext(c.ctx, "GET", c.buildHttpUrl().String(), nil)
+	// Use the request-scoped context so Stop() can cancel a long-poll that the
+	// server is holding open. Fall back to the run context when the transport is
+	// driven directly (e.g. in unit tests) without Run() setting reqCtx.
+	reqCtx := c.reqCtx
+	if reqCtx == nil {
+		reqCtx = c.ctx
+	}
+	req, err := http.NewRequestWithContext(reqCtx, "GET", c.buildHttpUrl().String(), nil)
 	if err != nil {
 		return fmt.Errorf("error creating request: %w", err)
 	}
@@ -228,6 +307,14 @@ func (c *Transport) poll() error {
 		return err
 	}
 	defer resp.Body.Close() //nolint:errcheck
+
+	// A non-2xx response (e.g. 400 "Session ID unknown" after the session was
+	// dropped) is surfaced as an error so the loop backs off instead of
+	// forwarding the error body as an engine.io packet and hot-spinning.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("unexpected polling response status %d", resp.StatusCode)
+	}
 
 	// Limit payload size to guard against OOM from a malicious/buggy server.
 	// maxPayloadSize <= 0 means unlimited (e.g. a Transport built directly
