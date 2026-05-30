@@ -1,6 +1,7 @@
 services:
-  # Default server: advertises websocket upgrades (exercises polling->ws
-  # upgrade and websocket-only connections).
+  # Socket.IO server that advertises websocket upgrades. Every transport mode
+  # (polling-only, websocket-only, polling->websocket upgrade) is tested against
+  # this single realistic endpoint.
   socketio-server:
     build:
       context: ./server
@@ -9,26 +10,8 @@ services:
       - "3000:3000"
     environment:
       PORT: "3000"
-      ALLOW_UPGRADES: "true"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/socket.io/?EIO=4&transport=polling"]
-      interval: 2s
-      timeout: 3s
-      retries: 15
-
-  # Polling-only server: no upgrades advertised (exercises pure long-polling).
-  socketio-server-polling:
-    image: go-socketio-e2e-server
-    depends_on:
-      - socketio-server
-    ports:
-      - "3001:3001"
-    environment:
-      PORT: "3001"
-      ALLOW_UPGRADES: "false"
-      PING_INTERVAL: "500"
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3001/socket.io/?EIO=4&transport=polling"]
       interval: 2s
       timeout: 3s
       retries: 15

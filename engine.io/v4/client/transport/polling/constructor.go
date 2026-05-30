@@ -24,8 +24,9 @@ func NewTransport(options ...EngineTransportOption) (*Transport, error) {
 		pinger:         time.NewTicker(10 * time.Second),
 		stopPooling:    make(chan struct{}, 1),
 		stopCh:         make(chan struct{}),
-		maxPayloadSize: 4 * 1024 * 1024, // 4MB default, matches socket.io JS maxHttpBufferSize
-		redactPayload:  true,            // production-safe default; WithDebugPayload(true) opts out
+		maxPayloadSize:   4 * 1024 * 1024, // 4MB default, matches socket.io JS maxHttpBufferSize
+		redactPayload:    true,            // production-safe default; WithDebugPayload(true) opts out
+		pollErrorBackoff: defaultPollErrorBackoff,
 	}
 
 	// Apply options

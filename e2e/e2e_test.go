@@ -16,8 +16,9 @@ import (
 	"github.com/maldikhan/go.socket.io/socket.io/v5/client/emit"
 )
 
-// serverURL returns the address of the default (upgrade-capable) Socket.IO
-// server under test.
+// serverURL returns the address of the Socket.IO server under test (a single
+// server that advertises a websocket upgrade, so every transport mode is
+// exercised against the same realistic endpoint).
 func serverURL() string {
 	if u := os.Getenv("E2E_SERVER_URL"); u != "" {
 		return u
@@ -25,25 +26,15 @@ func serverURL() string {
 	return "http://localhost:3000"
 }
 
-// pollingServerURL returns the address of the polling-only server (no websocket
-// upgrade advertised), used by the polling-only scenario.
-func pollingServerURL() string {
-	if u := os.Getenv("E2E_SERVER_URL_POLLING"); u != "" {
-		return u
-	}
-	return "http://localhost:3001"
-}
-
-// newClient builds a socket.io client constrained to the given transport mode:
+// newClient builds a socket.io client constrained to the given transport mode,
+// all against the same upgrade-advertising server:
 //   - "default":   polling with automatic upgrade to websocket
-//   - "polling":   HTTP long-polling only (no upgrade offered)
+//   - "polling":   HTTP long-polling only (no upgrade performed, even though the
+//     server offers one)
 //   - "websocket": websocket only (connects directly, no polling phase)
 func newClient(t *testing.T, mode string) *socketio.Client {
 	t.Helper()
 	url := serverURL()
-	if mode == "polling" {
-		url = pollingServerURL()
-	}
 
 	if mode == "default" {
 		client, err := socketio.NewClient(socketio.WithRawURL(url))

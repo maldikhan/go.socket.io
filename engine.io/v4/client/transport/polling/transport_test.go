@@ -37,6 +37,28 @@ func TestSetHandshake(t *testing.T) {
 	assert.NotNil(t, client.pinger)
 }
 
+func TestSetHandshakeReleasesGate(t *testing.T) {
+	t.Parallel()
+	client := &Transport{
+		pinger:        time.NewTicker(time.Minute),
+		handshakeDone: make(chan struct{}),
+	}
+
+	client.SetHandshake(&engineio_v4.HandshakeResponse{Sid: "sid", PingInterval: 1000})
+
+	select {
+	case <-client.handshakeDone:
+		// gate released as expected
+	default:
+		t.Fatal("SetHandshake did not close the handshake gate")
+	}
+
+	// A second call must not panic on the already-closed gate.
+	assert.NotPanics(t, func() {
+		client.SetHandshake(&engineio_v4.HandshakeResponse{Sid: "sid2", PingInterval: 1000})
+	})
+}
+
 func TestRequestHandshake(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -239,16 +261,14 @@ func TestPollingLoop(t *testing.T) {
 
 		client := &Transport{
 			log:         mockLogger,
-			pinger:      time.NewTicker(time.Minute),
 			stopPooling: make(chan struct{}),
 			ctx:         ctx,
 			onClose:     make(chan error, 1),
 		}
 
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			close(client.stopPooling)
-		}()
+		// A stop requested before the loop issues a poll exits cleanly without
+		// touching the network.
+		close(client.stopPooling)
 
 		err := client.pollingLoop()
 		assert.NoError(t, err)
@@ -264,21 +284,14 @@ func TestPollingLoop(t *testing.T) {
 		mockLogger.EXPECT().Debugf("context done, stop http polling")
 
 		ctx, cancel := context.WithCancel(context.Background())
-		ctx, timeout := context.WithTimeout(ctx, 5*time.Second)
-		defer timeout()
+		cancel() // cancelled before the loop runs
 
 		client := &Transport{
 			log:         mockLogger,
-			pinger:      time.NewTicker(time.Minute),
 			stopPooling: make(chan struct{}),
 			ctx:         ctx,
 			onClose:     make(chan error, 1),
 		}
-
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			cancel()
-		}()
 
 		err := client.pollingLoop()
 		assert.Error(t, err)
@@ -309,15 +322,16 @@ func TestPollingLoop(t *testing.T) {
 
 		onClose := make(chan error, 1)
 		client := &Transport{
-			url:         &url.URL{Scheme: "http", Host: "localhost"},
-			httpClient:  mockHttpClient,
-			log:         mockLogger,
-			pinger:      time.NewTicker(10 * time.Millisecond),
-			stopPooling: make(chan struct{}, 1),
-			stopCh:      make(chan struct{}),
-			ctx:         ctx,
-			onClose:     onClose,
-			messages:    make(chan []byte, 1),
+			url:              &url.URL{Scheme: "http", Host: "localhost"},
+			httpClient:       mockHttpClient,
+			log:              mockLogger,
+			pinger:           time.NewTicker(10 * time.Millisecond),
+			stopPooling:      make(chan struct{}, 1),
+			stopCh:           make(chan struct{}),
+			ctx:              ctx,
+			onClose:          onClose,
+			messages:         make(chan []byte, 1),
+			pollErrorBackoff: time.Second, // long enough that Stop() interrupts the backoff
 		}
 
 		go func() {
@@ -352,7 +366,7 @@ func TestPollingLoop(t *testing.T) {
 
 	})
 
-	t.Run("Ping interval closed chan", func(t *testing.T) {
+	t.Run("Stop interrupts in-flight poll", func(t *testing.T) {
 		t.Parallel()
 
 		ctrl := gomock.NewController(t)
@@ -361,24 +375,285 @@ func TestPollingLoop(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		tickerChan := make(chan time.Time)
-		close(tickerChan)
-		ticker := &time.Ticker{
-			C: tickerChan,
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHttpClient := mocks.NewMockHttpClient(ctrl)
+		mockLogger.EXPECT().Debugf("run polling").MinTimes(1)
+		mockLogger.EXPECT().Debugf("stop polling").MinTimes(1)
+
+		// Do blocks until the request context is cancelled, simulating a
+		// long-poll that the server holds open. Stop() must interrupt it via
+		// reqCtx rather than waiting for a response.
+		mockHttpClient.EXPECT().Do(gomock.Any()).DoAndReturn(func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		}).MinTimes(1)
+
+		onClose := make(chan error, 1)
+		client := &Transport{
+			url:         &url.URL{Scheme: "http", Host: "localhost"},
+			httpClient:  mockHttpClient,
+			log:         mockLogger,
+			stopPooling: make(chan struct{}, 1),
+			stopCh:      make(chan struct{}),
+			ctx:         ctx,
+			onClose:     onClose,
+			messages:    make(chan []byte, 1),
 		}
+		// Run() normally wires these; set them up directly for the unit test.
+		client.reqCtx, client.pollCancel = context.WithCancel(ctx)
+
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			assert.NoError(t, client.Stop())
+		}()
+
+		err := client.pollingLoop()
+		assert.NoError(t, err)
+
+		select {
+		case e := <-onClose:
+			assert.NoError(t, e) // parent ctx still alive -> nil
+		case <-time.After(100 * time.Millisecond):
+			assert.Fail(t, "expected onClose")
+		}
+	})
+
+	t.Run("Waits for handshake before polling", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
 		mockLogger := mocks.NewMockLogger(ctrl)
-		mockLogger.EXPECT().Warnf("pinger closed: stop pooling")
+		mockHttpClient := mocks.NewMockHttpClient(ctrl)
+		mockLogger.EXPECT().Debugf("run polling").MinTimes(1)
+		mockLogger.EXPECT().Debugf("stop polling").MinTimes(1)
+
+		polled := make(chan struct{})
+		var polledOnce sync.Once
+		mockHttpClient.EXPECT().Do(gomock.Any()).DoAndReturn(func(req *http.Request) (*http.Response, error) {
+			polledOnce.Do(func() { close(polled) })
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		}).MinTimes(1)
 
 		client := &Transport{
-			log:         mockLogger,
-			pinger:      ticker,
-			stopPooling: make(chan struct{}),
-			ctx:         ctx,
+			url:           &url.URL{Scheme: "http", Host: "localhost"},
+			httpClient:    mockHttpClient,
+			log:           mockLogger,
+			stopPooling:   make(chan struct{}, 1),
+			stopCh:        make(chan struct{}),
+			ctx:           ctx,
+			onClose:       make(chan error, 1),
+			messages:      make(chan []byte, 1),
+			handshakeDone: make(chan struct{}),
+		}
+		client.reqCtx, client.pollCancel = context.WithCancel(ctx)
+
+		exited := make(chan error, 1)
+		go func() { exited <- client.pollingLoop() }()
+
+		// No poll must happen until the handshake gate is released.
+		select {
+		case <-polled:
+			assert.Fail(t, "polled before handshake completed")
+		case <-time.After(20 * time.Millisecond):
+		}
+
+		close(client.handshakeDone)
+
+		select {
+		case <-polled:
+		case <-time.After(time.Second):
+			assert.Fail(t, "expected a poll after handshake")
+		}
+
+		assert.NoError(t, client.Stop())
+		select {
+		case err := <-exited:
+			assert.NoError(t, err)
+		case <-time.After(time.Second):
+			assert.Fail(t, "pollingLoop did not exit")
+		}
+	})
+
+	t.Run("Stop during handshake wait", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockLogger.EXPECT().Debugf("stop polling")
+
+		client := &Transport{
+			log:           mockLogger,
+			stopPooling:   make(chan struct{}, 1),
+			ctx:           ctx,
+			onClose:       make(chan error, 1),
+			handshakeDone: make(chan struct{}), // never released
+		}
+
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			close(client.stopPooling)
+		}()
+
+		err := client.pollingLoop()
+		assert.NoError(t, err)
+	})
+
+	t.Run("Context cancelled during handshake wait", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockLogger.EXPECT().Debugf("context done, stop http polling")
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // cancelled before the loop runs
+
+		client := &Transport{
+			log:           mockLogger,
+			stopPooling:   make(chan struct{}),
+			ctx:           ctx,
+			onClose:       make(chan error, 1),
+			handshakeDone: make(chan struct{}), // never released
 		}
 
 		err := client.pollingLoop()
-		assert.ErrorContains(t, err, "pinger closed")
+		assert.Error(t, err)
+		assert.True(t, errors.Is(err, context.Canceled))
+	})
+
+	t.Run("Context error after poll", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHttpClient := mocks.NewMockHttpClient(ctrl)
+		mockLogger.EXPECT().Debugf("run polling").MinTimes(1)
+		mockLogger.EXPECT().Debugf("context done, stop http polling")
+
+		mockHttpClient.EXPECT().Do(gomock.Any()).DoAndReturn(func(req *http.Request) (*http.Response, error) {
+			cancel() // parent context cancelled mid-poll (not via Stop)
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		}).MinTimes(1)
+
+		client := &Transport{
+			url:         &url.URL{Scheme: "http", Host: "localhost"},
+			httpClient:  mockHttpClient,
+			log:         mockLogger,
+			stopPooling: make(chan struct{}, 1),
+			stopCh:      make(chan struct{}),
+			ctx:         ctx,
+			onClose:     make(chan error, 1),
+			messages:    make(chan []byte, 1),
+		}
+		client.reqCtx, client.pollCancel = context.WithCancel(ctx)
+
+		err := client.pollingLoop()
+		assert.Error(t, err)
+		assert.True(t, errors.Is(err, context.Canceled))
+	})
+
+	t.Run("Backoff then retry", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHttpClient := mocks.NewMockHttpClient(ctrl)
+		mockLogger.EXPECT().Debugf("run polling").MinTimes(2)
+		mockLogger.EXPECT().Errorf("poll error: %s", gomock.Any()).MinTimes(1)
+		mockLogger.EXPECT().Debugf("stop polling").MinTimes(1)
+
+		var calls int32
+		mockHttpClient.EXPECT().Do(gomock.Any()).DoAndReturn(func(req *http.Request) (*http.Response, error) {
+			if atomic.AddInt32(&calls, 1) == 1 {
+				return nil, errors.New("transient") // first poll fails -> backoff
+			}
+			<-req.Context().Done() // second poll blocks until Stop
+			return nil, req.Context().Err()
+		}).MinTimes(2)
+
+		client := &Transport{
+			url:              &url.URL{Scheme: "http", Host: "localhost"},
+			httpClient:       mockHttpClient,
+			log:              mockLogger,
+			stopPooling:      make(chan struct{}, 1),
+			stopCh:           make(chan struct{}),
+			ctx:              ctx,
+			onClose:          make(chan error, 1),
+			messages:         make(chan []byte, 1),
+			pollErrorBackoff: 5 * time.Millisecond,
+		}
+		client.reqCtx, client.pollCancel = context.WithCancel(ctx)
+
+		go func() {
+			time.Sleep(60 * time.Millisecond)
+			assert.NoError(t, client.Stop())
+		}()
+
+		err := client.pollingLoop()
+		assert.NoError(t, err)
+	})
+
+	t.Run("Backoff interrupted by context", func(t *testing.T) {
+		t.Parallel()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHttpClient := mocks.NewMockHttpClient(ctrl)
+		mockLogger.EXPECT().Debugf("run polling").MinTimes(1)
+		mockLogger.EXPECT().Errorf("poll error: %s", gomock.Any()).MinTimes(1)
+		mockLogger.EXPECT().Debugf("context done, stop http polling")
+
+		mockHttpClient.EXPECT().Do(gomock.Any()).Return(nil, errors.New("transient")).MinTimes(1)
+
+		client := &Transport{
+			url:              &url.URL{Scheme: "http", Host: "localhost"},
+			httpClient:       mockHttpClient,
+			log:              mockLogger,
+			stopPooling:      make(chan struct{}, 1),
+			stopCh:           make(chan struct{}),
+			ctx:              ctx,
+			onClose:          make(chan error, 1),
+			messages:         make(chan []byte, 1),
+			pollErrorBackoff: time.Second, // long, so the context cancel wins
+		}
+		client.reqCtx, client.pollCancel = context.WithCancel(ctx)
+
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			cancel()
+		}()
+
+		err := client.pollingLoop()
+		assert.Error(t, err)
+		assert.True(t, errors.Is(err, context.Canceled))
 	})
 }
 
@@ -496,6 +771,39 @@ func TestPoll(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("Timeout waiting for poll to complete")
 		}
+	})
+
+	t.Run("Non-2xx response status", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		messagesChan := make(chan []byte, 1)
+		client := &Transport{
+			log:        mockLogger,
+			httpClient: mockHTTPClient,
+			url:        &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:        "test-sid",
+			ctx:        ctx,
+			messages:   messagesChan,
+		}
+
+		mockLogger.EXPECT().Debugf("run polling")
+		mockHTTPClient.EXPECT().Do(gomock.Any()).Return(&http.Response{
+			StatusCode: 400,
+			Body:       io.NopCloser(strings.NewReader(`{"code":1,"message":"Session ID unknown"}`)),
+		}, nil)
+
+		err := client.poll()
+		assert.ErrorContains(t, err, "unexpected polling response status 400")
+		// The error body must not be forwarded as an engine.io packet.
+		assert.Equal(t, 0, len(messagesChan))
 	})
 
 	t.Run("Error creating request", func(t *testing.T) {
@@ -1270,4 +1578,62 @@ func TestTransport_WithDebugPayload(t *testing.T) {
 	assert.False(t, c.redactPayload)
 	assert.NoError(t, WithDebugPayload(false)(c))
 	assert.True(t, c.redactPayload)
+}
+
+// TestHandshakeGateUpgradeToPolling is a regression guard: when polling is the
+// target of an upgrade, the engine client calls SetHandshake() on it (a no-op
+// while handshakeDone is still nil) before Run(), and Run() receives a known
+// session id. The gate must open from Run() so pollingLoop does not deadlock
+// waiting for a SetHandshake() that will not come again.
+func TestHandshakeGateUpgradeToPolling(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockHttpClient := mocks.NewMockHttpClient(ctrl)
+	mockLogger.EXPECT().Debugf(gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
+
+	polled := make(chan struct{})
+	var once sync.Once
+	mockHttpClient.EXPECT().Do(gomock.Any()).DoAndReturn(func(req *http.Request) (*http.Response, error) {
+		once.Do(func() { close(polled) })
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	}).AnyTimes()
+
+	transport := &Transport{
+		log:        mockLogger,
+		httpClient: mockHttpClient,
+		pinger:     time.NewTicker(time.Minute),
+	}
+
+	// SetHandshake happens first, while handshakeDone is still nil (no-op).
+	transport.SetHandshake(&engineio_v4.HandshakeResponse{Sid: "known-sid", PingInterval: 1000})
+	transport.mu.RLock()
+	preRunGate := transport.handshakeDone
+	transport.mu.RUnlock()
+	assert.Nil(t, preRunGate, "handshakeDone must not be allocated before Run()")
+
+	// The upgrade then runs the transport with the known session id.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	onClose := make(chan error, 1)
+	err := transport.Run(ctx, &url.URL{Scheme: "http", Host: "localhost", Path: "/socket.io/"}, "known-sid", make(chan []byte, 1), onClose)
+	assert.NoError(t, err)
+
+	// pollingLoop must reach poll() instead of blocking on the gate.
+	select {
+	case <-polled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pollingLoop deadlocked on handshake gate after upgrade-to-polling")
+	}
+
+	assert.NoError(t, transport.Stop())
+	select {
+	case <-onClose:
+	case <-time.After(time.Second):
+		t.Fatal("expected onClose after Stop")
+	}
 }

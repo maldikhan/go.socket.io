@@ -437,17 +437,20 @@ func TestClient_handleHandshake(t *testing.T) {
 	})
 
 	t.Run("Successful handshake with wrong upgrade", func(t *testing.T) {
+		// Multiple unsupported upgrades: each must be logged by its own name
+		// (regression guard — the warning previously always logged Upgrades[0]).
 		handshakeResp := &engineio_v4.HandshakeResponse{
 			Sid:          "test-sid",
 			PingInterval: 25000,
 			PingTimeout:  5000,
-			Upgrades:     []string{"xyz"},
+			Upgrades:     []string{"xyz", "abc"},
 		}
 		data, _ := json.Marshal(handshakeResp)
 
 		mockTransportPolling.EXPECT().SetHandshake(handshakeResp)
 		mockTransportWs.EXPECT().SetHandshake(handshakeResp)
 		mockLogger.EXPECT().Warnf("unsupported upgrade: %s", "xyz")
+		mockLogger.EXPECT().Warnf("unsupported upgrade: %s", "abc")
 
 		client.hadHandshake = sync.Once{}
 		client.waitHandshake = make(chan struct{})

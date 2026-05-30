@@ -231,7 +231,7 @@ func (c *Client) handleHandshake(data []byte) error {
 
 				break
 			} else {
-				c.log.Warnf("unsupported upgrade: %s", handshakeResp.Upgrades[0])
+				c.log.Warnf("unsupported upgrade: %s", newTransportName)
 			}
 		}
 	}
