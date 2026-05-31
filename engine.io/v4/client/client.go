@@ -260,15 +260,12 @@ func (c *Client) handleHandshake(data []byte) error {
 	return nil
 }
 
-// recordSeparator is the engine.io v4 payload delimiter (U+001E) that joins
-// multiple packets inside a single HTTP long-polling body.
-const recordSeparator = '\x1e'
-
-// handleFrame dispatches one transport frame. A binary frame is delivered as a
-// single attachment to the binary handler. A text frame may carry several
-// engine.io packets joined by the record separator (HTTP long-polling), so it
-// is split and each record handled in order. WebSocket frames carry exactly one
-// record, so splitting is a no-op there.
+// handleFrame dispatches one transport frame, which always carries exactly one
+// engine.io packet. A binary frame is delivered as a single attachment to the
+// binary handler. A text frame carries one packet record: the polling transport
+// splits a multi-packet long-polling body into individual record frames before
+// delivery, and the WebSocket transport already frames each packet on its own,
+// so the record separator (U+001E) never reaches this layer.
 func (c *Client) handleFrame(frame engineio_v4.Frame) error {
 	if frame.IsBinary {
 		c.log.Debugf("handle binary frame: %s", c.payload(frame.Data))
@@ -281,30 +278,11 @@ func (c *Client) handleFrame(frame engineio_v4.Frame) error {
 		return nil
 	}
 
-	for _, record := range splitRecords(frame.Data) {
-		if len(record) == 0 {
-			continue
-		}
-		if err := c.handlePacket(record); err != nil {
-			return err
-		}
+	// Defensively skip an empty text frame: it carries no packet to parse.
+	if len(frame.Data) == 0 {
+		return nil
 	}
-	return nil
-}
-
-// splitRecords splits a text payload on the engine.io record separator. A
-// payload without separators yields a single record, so single-packet frames
-// (and every WebSocket frame) flow through unchanged.
-func splitRecords(data []byte) [][]byte {
-	var out [][]byte
-	start := 0
-	for i := 0; i < len(data); i++ {
-		if data[i] == recordSeparator {
-			out = append(out, data[start:i])
-			start = i + 1
-		}
-	}
-	return append(out, data[start:])
+	return c.handlePacket(frame.Data)
 }
 
 func (c *Client) handlePacket(packetData []byte) error {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 	mocks "github.com/maldikhan/go.socket.io/engine.io/v4/client/transport/polling/mocks"
@@ -714,6 +715,45 @@ func TestStop(t *testing.T) {
 	})
 }
 
+func TestSplitRecords(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input []byte
+		want  [][]byte
+	}{
+		{
+			name:  "no separator yields single record",
+			input: []byte("4hello"),
+			want:  [][]byte{[]byte("4hello")},
+		},
+		{
+			name:  "two records",
+			input: []byte("4hello\x1e4world"),
+			want:  [][]byte{[]byte("4hello"), []byte("4world")},
+		},
+		{
+			name:  "trailing separator yields empty tail",
+			input: []byte("4a\x1e"),
+			want:  [][]byte{[]byte("4a"), {}},
+		},
+		{
+			name:  "empty input yields one empty record",
+			input: []byte{},
+			want:  [][]byte{{}},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, splitRecords(tt.input))
+		})
+	}
+}
+
 func TestPoll(t *testing.T) {
 
 	t.Run("Successful poll", func(t *testing.T) {
@@ -771,6 +811,46 @@ func TestPoll(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("Timeout waiting for poll to complete")
 		}
+	})
+
+	t.Run("Multi-record body split into separate frames", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		mockLogger := mocks.NewMockLogger(ctrl)
+		mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// A trailing separator yields an empty tail record that must be dropped:
+		// only the two non-empty packets are delivered.
+		body := "4hello\x1e4world\x1e"
+		messagesChan := make(chan engineio_v4.Frame, 4)
+
+		client := &Transport{
+			log:        mockLogger,
+			httpClient: mockHTTPClient,
+			url:        &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+			sid:        "test-sid",
+			ctx:        ctx,
+			messages:   messagesChan,
+		}
+
+		mockLogger.EXPECT().Debugf("run polling")
+		mockLogger.EXPECT().Debugf("receiveHttp: %s", body)
+
+		mockHTTPClient.EXPECT().Do(gomock.Any()).Return(&http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil)
+
+		err := client.poll()
+		require.NoError(t, err)
+		require.Equal(t, 2, len(messagesChan), "expected two packet frames")
+		assert.Equal(t, engineio_v4.Frame{Data: []byte("4hello")}, <-messagesChan)
+		assert.Equal(t, engineio_v4.Frame{Data: []byte("4world")}, <-messagesChan)
 	})
 
 	t.Run("Non-2xx response status", func(t *testing.T) {

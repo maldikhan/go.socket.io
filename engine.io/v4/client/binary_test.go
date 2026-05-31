@@ -30,45 +30,6 @@ func newBinaryTestClient(t *testing.T) (*Client, *mocks.MockTransport, *mocks.Mo
 	return client, mockTransport, mockParser, mockLogger
 }
 
-func TestClient_splitRecords(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		input []byte
-		want  [][]byte
-	}{
-		{
-			name:  "no separator yields single record",
-			input: []byte("4hello"),
-			want:  [][]byte{[]byte("4hello")},
-		},
-		{
-			name:  "two records",
-			input: []byte("4hello\x1e4world"),
-			want:  [][]byte{[]byte("4hello"), []byte("4world")},
-		},
-		{
-			name:  "trailing separator yields empty tail",
-			input: []byte("4a\x1e"),
-			want:  [][]byte{[]byte("4a"), {}},
-		},
-		{
-			name:  "empty input yields one empty record",
-			input: []byte{},
-			want:  [][]byte{{}},
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, splitRecords(tt.input))
-		})
-	}
-}
-
 func TestClient_handleFrame_Binary(t *testing.T) {
 	client, _, _, _ := newBinaryTestClient(t)
 
@@ -89,36 +50,33 @@ func TestClient_handleFrame_BinaryNoHandler(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestClient_handleFrame_EmptyRecordSkipped(t *testing.T) {
+func TestClient_handleFrame_EmptyFrameSkipped(t *testing.T) {
 	client, _, mockParser, _ := newBinaryTestClient(t)
 
-	// A trailing separator produces an empty record that must be skipped (only
-	// the non-empty "4a" record is parsed).
-	mockParser.EXPECT().Parse([]byte("4a")).Return(&engineio_v4.Message{
-		Type: engineio_v4.PacketMessage, Data: []byte("a"),
-	}, nil)
+	// An empty text frame carries no packet: handleFrame must skip it without
+	// ever invoking the parser. Record splitting now lives in the polling
+	// transport, so the engine.io client only ever sees single-packet frames.
+	mockParser.EXPECT().Parse(gomock.Any()).Times(0)
 
-	err := client.handleFrame(engineio_v4.Frame{Data: []byte("4a\x1e")})
+	err := client.handleFrame(engineio_v4.Frame{Data: []byte{}})
 	require.NoError(t, err)
 }
 
-func TestClient_handleFrame_MultiRecord(t *testing.T) {
+func TestClient_handleFrame_SingleRecord(t *testing.T) {
 	client, _, mockParser, _ := newBinaryTestClient(t)
 
-	got := make(chan []byte, 2)
+	got := make(chan []byte, 1)
 	client.On("message", func(data []byte) { got <- data })
 
+	// A text frame carries exactly one packet (the transports deliver one
+	// record per frame), so the whole frame is parsed as a single packet.
 	mockParser.EXPECT().Parse([]byte("4a")).Return(&engineio_v4.Message{
 		Type: engineio_v4.PacketMessage, Data: []byte("a"),
 	}, nil)
-	mockParser.EXPECT().Parse([]byte("4b")).Return(&engineio_v4.Message{
-		Type: engineio_v4.PacketMessage, Data: []byte("b"),
-	}, nil)
 
-	err := client.handleFrame(engineio_v4.Frame{Data: []byte("4a\x1e4b")})
+	err := client.handleFrame(engineio_v4.Frame{Data: []byte("4a")})
 	require.NoError(t, err)
 	assert.Equal(t, []byte("a"), <-got)
-	assert.Equal(t, []byte("b"), <-got)
 }
 
 func TestClient_handleFrame_RecordParseError(t *testing.T) {
