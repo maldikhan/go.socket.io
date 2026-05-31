@@ -111,6 +111,12 @@ func (p *SocketIOV5DefaultParser) Parse(data []byte) (*socketio_v5.Message, erro
 	if err != nil {
 		return nil, err
 	}
+	if len(packetData) == 0 {
+		// A truncated binary header (e.g. "51-") leaves nothing after the
+		// attachment count; extractNamespace would index packetData[0] and panic
+		// on this untrusted wire input, so reject it as a malformed packet.
+		return nil, fmt.Errorf("%w: %v", ErrParsePackage, errors.New("wrong package payload"))
+	}
 
 	packetData = p.extractNamespace(msg, packetData)
 
