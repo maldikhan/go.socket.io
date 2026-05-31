@@ -388,7 +388,9 @@ func sentinelSlice(rv reflect.Value, attachments *[][]byte, sentinels map[string
 	num := len(*attachments)
 	*attachments = append(*attachments, buf)
 
-	sentinel := makeSentinel(nonce, num)
+	// num is a slice length, hence always non-negative; the conversion to the
+	// fixed-width index is safe (no overflow/sign change).
+	sentinel := makeSentinel(nonce, uint64(num))
 	sentinels[base64.StdEncoding.EncodeToString(sentinel)] = num
 
 	sv := reflect.ValueOf(sentinel)
@@ -405,12 +407,12 @@ func sentinelSlice(rv reflect.Value, attachments *[][]byte, sentinels map[string
 // makes the token (and thus its base64 needle) unpredictable to an application
 // payload; the index keeps tokens distinct within one serialization (see
 // sentinelMagic).
-func makeSentinel(nonce []byte, num int) []byte {
+func makeSentinel(nonce []byte, num uint64) []byte {
 	s := make([]byte, 0, len(sentinelMagic)+len(nonce)+8)
 	s = append(s, sentinelMagic...)
 	s = append(s, nonce...)
 	var idx [8]byte
-	binary.BigEndian.PutUint64(idx[:], uint64(num))
+	binary.BigEndian.PutUint64(idx[:], num)
 	return append(s, idx[:]...)
 }
 
