@@ -289,6 +289,85 @@ func TestSerializeBinary_HonorsJSONTagOptions(t *testing.T) {
 	assert.Contains(t, headerStr, `"file":{"_placeholder":true,"num":0}`)
 }
 
+// Regression (Codex P2, binary.go:393): a user string that happens to equal a
+// sentinel's base64 must never be rewritten into a placeholder. The deterministic
+// scheme made the attachment-0 sentinel base64 a fixed, guessable string
+// ("G1NJT0JJThsAAAAAAAAAAA=="); a payload carrying that string BEFORE the real
+// []byte (map keys marshal sorted, so "a" < "b") had its string spliced into the
+// placeholder while the real binary field was left as the sentinel text. The
+// per-serialization random nonce makes the needle unguessable, so the user string
+// survives verbatim and only the real []byte becomes the placeholder.
+func TestSerializeBinary_UserStringMatchingOldSentinelPreserved(t *testing.T) {
+	t.Parallel()
+	parser := NewParser(WithLogger(logger))
+
+	const oldSentinelB64 = "G1NJT0JJThsAAAAAAAAAAA==" // base64 of the former fixed attachment-0 sentinel
+	event := &socketio_v5.Event{
+		Name: "upload",
+		Payloads: []interface{}{map[string]interface{}{
+			"a": oldSentinelB64,
+			"b": []byte{0x01, 0x02},
+		}},
+	}
+	require.True(t, parser.HasBinary(event))
+
+	header, attachments, err := parser.SerializeBinary(&socketio_v5.Message{
+		Type: socketio_v5.PacketEvent, NS: "/", Event: event,
+	})
+	require.NoError(t, err)
+	require.Len(t, attachments, 1)
+	assert.Equal(t, []byte{0x01, 0x02}, attachments[0])
+
+	headerStr := string(header)
+	assert.Contains(t, headerStr, `"a":"`+oldSentinelB64+`"`, "user string must survive verbatim")
+	assert.Contains(t, headerStr, `"b":{"_placeholder":true,"num":0}`, "only the real []byte is a placeholder")
+}
+
+// Regression (Codex P2, binary.go:313): for a slice whose element type encodes its
+// own bytes via a POINTER-receiver json.Marshaler, encoding/json invokes that
+// marshaler on each (addressable) element. The send path must NOT descend into such
+// an element and swap its []byte for a sentinel the marshaler would re-encode
+// (here as hex) instead of emitting the base64 needle. implementsMarshaler now
+// recognizes pointer-receiver marshalers, so the type owns its encoding: HasBinary
+// is false and the value renders exactly as on the text path, with no orphan
+// attachment.
+type hexBlob struct {
+	Data []byte
+}
+
+// MarshalJSON is defined on the POINTER receiver, so only *hexBlob (not hexBlob)
+// satisfies json.Marshaler — the exact case json applies to slice elements.
+func (h *hexBlob) MarshalJSON() ([]byte, error) {
+	const hexdigits = "0123456789abcdef"
+	out := make([]byte, 0, len(h.Data)*2+2)
+	out = append(out, '"')
+	for _, b := range h.Data {
+		out = append(out, hexdigits[b>>4], hexdigits[b&0x0f])
+	}
+	return append(out, '"'), nil
+}
+
+func TestSerializeBinary_PointerMarshalerSliceNotCorrupted(t *testing.T) {
+	t.Parallel()
+	parser := NewParser(WithLogger(logger))
+
+	event := &socketio_v5.Event{
+		Name:     "blobs",
+		Payloads: []interface{}{[]hexBlob{{Data: []byte{0xaa, 0xbb}}}},
+	}
+	// The marshaler owns the bytes, so this is not a binary attachment payload.
+	require.False(t, parser.HasBinary(event))
+
+	out, err := parser.Serialize(&socketio_v5.Message{
+		Type: socketio_v5.PacketEvent, NS: "/", Event: event,
+	})
+	require.NoError(t, err)
+	outStr := string(out)
+	assert.Contains(t, outStr, `"aabb"`, "pointer marshaler output must be preserved")
+	assert.NotContains(t, outStr, "_placeholder", "no placeholder for marshaler-owned bytes")
+	assert.NotContains(t, outStr, "SIOBIN", "no leaked sentinel")
+}
+
 // Contrast: a struct without []byte stays on the plain text Serialize path and
 // (if it ever went through SerializeBinary) yields zero attachments.
 func TestSerialize_NonBinaryStructStaysText(t *testing.T) {

@@ -2,6 +2,7 @@ package socketio_v5_parser_default
 
 import (
 	"bytes"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -144,7 +145,7 @@ func TestTransformBinary_DepthBound(t *testing.T) {
 	var attachments [][]byte
 	sentinels := map[string]int{}
 	// depth == 0 returns the value unchanged without recursing.
-	out := transformBinary(reflect.ValueOf("x"), &attachments, sentinels, 0)
+	out := transformBinary(reflect.ValueOf("x"), &attachments, sentinels, nil, 0)
 	assert.Equal(t, "x", out.Interface())
 	assert.Len(t, attachments, 0)
 }
@@ -154,7 +155,7 @@ func TestTransformBinary_InvalidValue(t *testing.T) {
 	var attachments [][]byte
 	sentinels := map[string]int{}
 	// An invalid reflect.Value (the zero Value) is returned as-is, no panic.
-	out := transformBinary(reflect.Value{}, &attachments, sentinels, 5)
+	out := transformBinary(reflect.Value{}, &attachments, sentinels, nil, 5)
 	assert.False(t, out.IsValid())
 	assert.Len(t, attachments, 0)
 }
@@ -281,4 +282,18 @@ func TestSerializeBinary_ExportedBinaryWithUnexportedField(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, attachments, 1)
 	assert.Equal(t, []byte("x"), attachments[0])
+}
+
+// extractBinary surfaces a failure of the sentinel-nonce random source as an
+// ErrParseBinary rather than emitting predictable sentinels. randRead is swapped
+// in a NON-parallel test so the override is fully restored before any t.Parallel()
+// test resumes.
+func TestExtractBinary_RandFailure(t *testing.T) {
+	orig := randRead
+	randRead = func([]byte) (int, error) { return 0, errors.New("no entropy") }
+	defer func() { randRead = orig }()
+
+	var attachments [][]byte
+	_, err := extractBinary(uploadStruct{File: []byte{0x01}}, &attachments)
+	assert.ErrorIs(t, err, ErrParseBinary)
 }

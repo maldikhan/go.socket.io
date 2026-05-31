@@ -2,6 +2,7 @@ package socketio_v5_parser_default
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -30,11 +31,21 @@ var (
 	textMarshalerType = reflect.TypeOf((*interface{ MarshalText() ([]byte, error) })(nil)).Elem()
 )
 
-// sentinelMagic prefixes every binary sentinel slice. Combined with the
-// attachment index it makes each sentinel unique (so its base64 form is a unique
-// needle for splicePlaceholders) and, thanks to the control bytes, astronomically
-// unlikely to collide with real string data in a payload.
+// sentinelMagic prefixes every binary sentinel slice. Each sentinel is also given
+// a per-serialization random nonce and the attachment index, so its base64 form is
+// a unique needle for splicePlaceholders that an application payload cannot
+// predict: a user string can therefore never be mistaken for a sentinel (and so
+// never rewritten into a placeholder) except with cryptographically negligible
+// probability. The leading control bytes keep it visually distinct in logs.
 var sentinelMagic = []byte{0x1b, 'S', 'I', 'O', 'B', 'I', 'N', 0x1b}
+
+// sentinelNonceLen is the number of random bytes mixed into every sentinel of a
+// single serialization, making the sentinels' base64 needles unguessable.
+const sentinelNonceLen = 16
+
+// randRead is the source of sentinel-nonce randomness, indirected through a
+// package var only so tests can force the (otherwise unreachable) rand failure.
+var randRead = rand.Read
 
 // ErrParseBinary is returned when binary attachments cannot be reconciled with
 // the placeholders found in a PacketBinaryEvent/PacketBinaryAck payload.
@@ -252,10 +263,21 @@ func reflectHasBinary(rv reflect.Value, depth int) bool {
 	return false
 }
 
-// implementsMarshaler reports whether t (or *t) controls its own JSON or text
-// encoding via json.Marshaler / encoding.TextMarshaler.
+// implementsMarshaler reports whether t controls its own JSON or text encoding via
+// json.Marshaler / encoding.TextMarshaler, on EITHER a value or a pointer receiver.
+// The pointer-receiver case matters because encoding/json invokes a pointer
+// marshaler for the addressable values it builds (slice/array elements, addressable
+// struct fields). If we descended into such a value and swapped its []byte for a
+// sentinel, the marshaler would encode the sentinel bytes itself (e.g. as hex) and
+// never emit the base64 needle splicePlaceholders looks for — corrupting the output
+// and leaving an orphan attachment. Treating these types as owning their encoding
+// keeps the binary path byte-for-byte consistent with the text path for them.
 func implementsMarshaler(t reflect.Type) bool {
-	return t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType)
+	if t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) {
+		return true
+	}
+	pt := reflect.PtrTo(t)
+	return pt.Implements(jsonMarshalerType) || pt.Implements(textMarshalerType)
 }
 
 // extractBinary returns a JSON-marshalable representation of one event payload in
@@ -274,8 +296,12 @@ func extractBinary(value interface{}, attachments *[][]byte) (interface{}, error
 	if !valueHasBinary(value) {
 		return value, nil
 	}
+	nonce := make([]byte, sentinelNonceLen)
+	if _, err := randRead(nonce); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrParseBinary, err)
+	}
 	sentinels := make(map[string]int)
-	transformed := transformBinary(reflect.ValueOf(value), attachments, sentinels, maxBinaryScanDepth)
+	transformed := transformBinary(reflect.ValueOf(value), attachments, sentinels, nonce, maxBinaryScanDepth)
 	data, err := json.Marshal(transformed.Interface())
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrParseBinary, err)
@@ -290,7 +316,7 @@ func extractBinary(value interface{}, attachments *[][]byte) (interface{}, error
 // whose type owns its encoding, or once the depth bound is hit) are returned
 // unchanged and shared with the original — they are never mutated, because only
 // freshly built containers are ever written to.
-func transformBinary(rv reflect.Value, attachments *[][]byte, sentinels map[string]int, depth int) reflect.Value {
+func transformBinary(rv reflect.Value, attachments *[][]byte, sentinels map[string]int, nonce []byte, depth int) reflect.Value {
 	if depth <= 0 || !rv.IsValid() || !reflectHasBinary(rv, depth) {
 		return rv
 	}
@@ -298,31 +324,31 @@ func transformBinary(rv reflect.Value, attachments *[][]byte, sentinels map[stri
 	switch rv.Kind() {
 	case reflect.Ptr:
 		np := reflect.New(rv.Type().Elem())
-		np.Elem().Set(transformBinary(rv.Elem(), attachments, sentinels, depth-1))
+		np.Elem().Set(transformBinary(rv.Elem(), attachments, sentinels, nonce, depth-1))
 		return np
 	case reflect.Interface:
 		out := reflect.New(rv.Type()).Elem()
-		out.Set(transformBinary(rv.Elem(), attachments, sentinels, depth-1))
+		out.Set(transformBinary(rv.Elem(), attachments, sentinels, nonce, depth-1))
 		return out
 	case reflect.Slice:
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
-			return sentinelSlice(rv, attachments, sentinels)
+			return sentinelSlice(rv, attachments, sentinels, nonce)
 		}
 		ns := reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
 		for i := 0; i < rv.Len(); i++ {
-			ns.Index(i).Set(transformBinary(rv.Index(i), attachments, sentinels, depth-1))
+			ns.Index(i).Set(transformBinary(rv.Index(i), attachments, sentinels, nonce, depth-1))
 		}
 		return ns
 	case reflect.Array:
 		na := reflect.New(rv.Type()).Elem()
 		for i := 0; i < rv.Len(); i++ {
-			na.Index(i).Set(transformBinary(rv.Index(i), attachments, sentinels, depth-1))
+			na.Index(i).Set(transformBinary(rv.Index(i), attachments, sentinels, nonce, depth-1))
 		}
 		return na
 	case reflect.Map:
 		nm := reflect.MakeMap(rv.Type())
 		for _, key := range rv.MapKeys() {
-			nm.SetMapIndex(key, transformBinary(rv.MapIndex(key), attachments, sentinels, depth-1))
+			nm.SetMapIndex(key, transformBinary(rv.MapIndex(key), attachments, sentinels, nonce, depth-1))
 		}
 		return nm
 	}
@@ -347,7 +373,7 @@ func transformBinary(rv reflect.Value, attachments *[][]byte, sentinels map[stri
 		if omitempty && isEmptyValue(fv) {
 			continue
 		}
-		ns.Field(i).Set(transformBinary(fv, attachments, sentinels, depth-1))
+		ns.Field(i).Set(transformBinary(fv, attachments, sentinels, nonce, depth-1))
 	}
 	return ns
 }
@@ -355,14 +381,14 @@ func transformBinary(rv reflect.Value, attachments *[][]byte, sentinels map[stri
 // sentinelSlice records rv's bytes as the next attachment and returns a same-typed
 // slice holding a unique sentinel. encoding/json renders the sentinel as a base64
 // string, which splicePlaceholders then rewrites into the placeholder object.
-func sentinelSlice(rv reflect.Value, attachments *[][]byte, sentinels map[string]int) reflect.Value {
+func sentinelSlice(rv reflect.Value, attachments *[][]byte, sentinels map[string]int, nonce []byte) reflect.Value {
 	orig := rv.Bytes()
 	buf := make([]byte, len(orig))
 	copy(buf, orig)
 	num := len(*attachments)
 	*attachments = append(*attachments, buf)
 
-	sentinel := makeSentinel(num)
+	sentinel := makeSentinel(nonce, num)
 	sentinels[base64.StdEncoding.EncodeToString(sentinel)] = num
 
 	sv := reflect.ValueOf(sentinel)
@@ -374,13 +400,18 @@ func sentinelSlice(rv reflect.Value, attachments *[][]byte, sentinels map[string
 	return sv
 }
 
-// makeSentinel builds the unique, marshaling-stable byte token for attachment num
-// (see sentinelMagic).
-func makeSentinel(num int) []byte {
-	s := make([]byte, len(sentinelMagic)+8)
-	copy(s, sentinelMagic)
-	binary.BigEndian.PutUint64(s[len(sentinelMagic):], uint64(num))
-	return s
+// makeSentinel builds the unique, marshaling-stable byte token for attachment num:
+// the fixed magic, this serialization's random nonce, and the index. The nonce
+// makes the token (and thus its base64 needle) unpredictable to an application
+// payload; the index keeps tokens distinct within one serialization (see
+// sentinelMagic).
+func makeSentinel(nonce []byte, num int) []byte {
+	s := make([]byte, 0, len(sentinelMagic)+len(nonce)+8)
+	s = append(s, sentinelMagic...)
+	s = append(s, nonce...)
+	var idx [8]byte
+	binary.BigEndian.PutUint64(idx[:], uint64(num))
+	return append(s, idx[:]...)
 }
 
 // splicePlaceholders rewrites each sentinel's base64 JSON string ("<b64>") into a
