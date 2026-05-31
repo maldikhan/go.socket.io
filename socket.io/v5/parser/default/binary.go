@@ -15,6 +15,12 @@ import (
 // are far shallower than this, so the bound never trips for legitimate data.
 const maxBinaryScanDepth = 100
 
+// rawMessageType is json.RawMessage's reflect type. Although it is a []byte
+// under the hood, it carries pre-encoded JSON that must pass through to
+// encoding/json unchanged — it is NOT a Socket.IO binary attachment. It is
+// matched by reflect type (not the []byte fast path, which a named type skips).
+var rawMessageType = reflect.TypeOf(json.RawMessage(nil))
+
 // ErrParseBinary is returned when binary attachments cannot be reconciled with
 // the placeholders found in a PacketBinaryEvent/PacketBinaryAck payload.
 var ErrParseBinary = errors.New("parse binary error")
@@ -178,6 +184,11 @@ func reflectHasBinary(rv reflect.Value, depth int) bool {
 		}
 		return reflectHasBinary(rv.Elem(), depth-1)
 	case reflect.Slice:
+		// json.RawMessage is pre-encoded JSON, not binary, even though it is a
+		// []byte under the hood.
+		if rv.Type() == rawMessageType {
+			return false
+		}
 		// []byte is the binary leaf; anything else is a slice to descend into.
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
 			return true

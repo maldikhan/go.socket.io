@@ -50,6 +50,18 @@ type exportedBinaryWithUnexported struct {
 	secret string // unexported: skipped via the PkgPath continue
 }
 
+// rawMessageStruct holds pre-encoded JSON that must NOT be treated as binary.
+type rawMessageStruct struct {
+	Meta json.RawMessage
+}
+
+// rawAndBytesStruct mixes pass-through JSON with a real binary field: only File
+// must become an attachment; Meta stays inline JSON.
+type rawAndBytesStruct struct {
+	Meta json.RawMessage
+	File []byte
+}
+
 type cyclic struct {
 	Self *cyclic
 	Name string
@@ -78,6 +90,11 @@ func TestHasBinary_StructPayloads(t *testing.T) {
 		{"pointer to struct without []byte", &noBinaryStruct{Name: "x"}, false},
 		{"unexported []byte field is ignored", unexportedBinaryStruct{secret: data, Name: "x"}, false},
 		{"plain []string is not binary", []string{"a", "b"}, false},
+		// json.RawMessage is a []byte alias but carries pre-encoded JSON, so it
+		// must take the text path, not be sent as a binary attachment.
+		{"top-level json.RawMessage is not binary", json.RawMessage(`{"a":1}`), false},
+		{"struct field json.RawMessage is not binary", rawMessageStruct{Meta: json.RawMessage(`[1,2]`)}, false},
+		{"struct mixing []byte and RawMessage is binary", rawAndBytesStruct{Meta: json.RawMessage(`{}`), File: data}, true},
 		{"nil pointer struct", (*uploadStruct)(nil), false},
 		{"plain string", "hello", false},
 		{"nil payload", nil, false},
@@ -206,6 +223,39 @@ func TestSerializeBinary_StructPreservesJSONMarshaler(t *testing.T) {
 	// time.Time must keep its RFC3339 rendering, NOT collapse to an empty object.
 	assert.Contains(t, headerStr, `"t":`+string(wantTS))
 	assert.NotContains(t, headerStr, `"t":{}`, "json.Marshaler must be honored, not flattened")
+}
+
+// A struct mixing a json.RawMessage with a real []byte must extract only the
+// bytes as an attachment while the RawMessage stays inline in the header JSON
+// (as the array/object it encodes), not as a second attachment or a base64
+// string.
+func TestSerializeBinary_RawMessageStaysInline(t *testing.T) {
+	t.Parallel()
+	parser := NewParser(WithLogger(logger))
+
+	data := []byte{0x09, 0x08}
+	event := &socketio_v5.Event{
+		Name:     "upload",
+		Payloads: []interface{}{rawAndBytesStruct{Meta: json.RawMessage(`{"k":1}`), File: data}},
+	}
+	require.True(t, parser.HasBinary(event))
+
+	header, attachments, err := parser.SerializeBinary(&socketio_v5.Message{
+		Type:  socketio_v5.PacketEvent,
+		NS:    "/",
+		Event: event,
+	})
+	require.NoError(t, err)
+
+	// Only the []byte field becomes an attachment.
+	require.Len(t, attachments, 1)
+	assert.Equal(t, data, attachments[0])
+
+	headerStr := string(header)
+	// RawMessage is emitted as the JSON it carries, not as a placeholder.
+	assert.Contains(t, headerStr, `"Meta":{"k":1}`)
+	assert.Contains(t, headerStr, "_placeholder", "the []byte field is a placeholder")
+	assert.Contains(t, headerStr, `"num":0`)
 }
 
 // Contrast: a struct without []byte stays on the plain text Serialize path and
