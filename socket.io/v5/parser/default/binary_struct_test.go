@@ -327,10 +327,10 @@ func TestSerializeBinary_UserStringMatchingOldSentinelPreserved(t *testing.T) {
 // own bytes via a POINTER-receiver json.Marshaler, encoding/json invokes that
 // marshaler on each (addressable) element. The send path must NOT descend into such
 // an element and swap its []byte for a sentinel the marshaler would re-encode
-// (here as hex) instead of emitting the base64 needle. implementsMarshaler now
-// recognizes pointer-receiver marshalers, so the type owns its encoding: HasBinary
-// is false and the value renders exactly as on the text path, with no orphan
-// attachment.
+// (here as hex) instead of emitting the base64 needle. ownsEncoding treats an
+// addressable pointer-receiver marshaler as owning its encoding, so HasBinary is
+// false for the slice and the value renders exactly as on the text path, with no
+// orphan attachment.
 type hexBlob struct {
 	Data []byte
 }
@@ -366,6 +366,53 @@ func TestSerializeBinary_PointerMarshalerSliceNotCorrupted(t *testing.T) {
 	assert.Contains(t, outStr, `"aabb"`, "pointer marshaler output must be preserved")
 	assert.NotContains(t, outStr, "_placeholder", "no placeholder for marshaler-owned bytes")
 	assert.NotContains(t, outStr, "SIOBIN", "no leaked sentinel")
+}
+
+// Regression (Codex P2, binary.go:280): a type implementing json.Marshaler only on
+// its POINTER receiver is honored by encoding/json ONLY for addressable values. For
+// a NON-addressable value — a top-level Emit payload or a map value held in an
+// interface{} — json ignores the pointer marshaler and encodes the exported fields
+// (base64 for the []byte). ownsEncoding must therefore NOT treat such values as
+// marshaler-owned: HasBinary descends and the []byte is correctly lifted into a
+// Socket.IO binary attachment instead of being buried as base64 JSON.
+func TestSerializeBinary_PointerMarshalerNonAddressableLiftsBinary(t *testing.T) {
+	t.Parallel()
+	parser := NewParser(WithLogger(logger))
+
+	t.Run("top-level value", func(t *testing.T) {
+		t.Parallel()
+		event := &socketio_v5.Event{
+			Name:     "upload",
+			Payloads: []interface{}{hexBlob{Data: []byte{0xaa, 0xbb}}},
+		}
+		require.True(t, parser.HasBinary(event), "non-addressable *hexBlob value must descend")
+
+		header, attachments, err := parser.SerializeBinary(&socketio_v5.Message{
+			Type: socketio_v5.PacketEvent, NS: "/", Event: event,
+		})
+		require.NoError(t, err)
+		require.Len(t, attachments, 1)
+		assert.Equal(t, []byte{0xaa, 0xbb}, attachments[0])
+		headerStr := string(header)
+		assert.Contains(t, headerStr, `{"_placeholder":true,"num":0}`)
+		assert.NotContains(t, headerStr, "aabb", "pointer marshaler must NOT run for a non-addressable value")
+	})
+
+	t.Run("map value", func(t *testing.T) {
+		t.Parallel()
+		event := &socketio_v5.Event{
+			Name:     "upload",
+			Payloads: []interface{}{map[string]interface{}{"blob": hexBlob{Data: []byte{0x01, 0x02}}}},
+		}
+		require.True(t, parser.HasBinary(event), "non-addressable map value must descend")
+
+		_, attachments, err := parser.SerializeBinary(&socketio_v5.Message{
+			Type: socketio_v5.PacketEvent, NS: "/", Event: event,
+		})
+		require.NoError(t, err)
+		require.Len(t, attachments, 1)
+		assert.Equal(t, []byte{0x01, 0x02}, attachments[0])
+	})
 }
 
 // Contrast: a struct without []byte stays on the plain text Serialize path and

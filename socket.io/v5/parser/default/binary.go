@@ -207,12 +207,12 @@ func reflectHasBinary(rv reflect.Value, depth int) bool {
 	// its bytes go out via that marshaler (e.g. time.Time, json.RawMessage), never
 	// as a binary attachment. For Interface kind rv.Type() is the interface itself
 	// (no marshaler) and the concrete type is re-checked after the deref below.
-	if implementsMarshaler(rv.Type()) {
+	if ownsEncoding(rv) {
 		return false
 	}
 
 	switch rv.Kind() {
-	case reflect.Ptr, reflect.Interface:
+	case reflect.Pointer, reflect.Interface:
 		if rv.IsNil() {
 			return false
 		}
@@ -263,21 +263,30 @@ func reflectHasBinary(rv reflect.Value, depth int) bool {
 	return false
 }
 
-// implementsMarshaler reports whether t controls its own JSON or text encoding via
-// json.Marshaler / encoding.TextMarshaler, on EITHER a value or a pointer receiver.
-// The pointer-receiver case matters because encoding/json invokes a pointer
-// marshaler for the addressable values it builds (slice/array elements, addressable
-// struct fields). If we descended into such a value and swapped its []byte for a
-// sentinel, the marshaler would encode the sentinel bytes itself (e.g. as hex) and
-// never emit the base64 needle splicePlaceholders looks for — corrupting the output
-// and leaving an orphan attachment. Treating these types as owning their encoding
-// keeps the binary path byte-for-byte consistent with the text path for them.
-func implementsMarshaler(t reflect.Type) bool {
+// ownsEncoding reports whether rv controls its own JSON or text encoding via
+// json.Marshaler / encoding.TextMarshaler, in which case its bytes are emitted by
+// that marshaler (e.g. time.Time, json.RawMessage) and must never be lifted into a
+// binary attachment.
+//
+// A value-receiver marshaler always owns its encoding. A type that implements the
+// marshaler only on its POINTER receiver is honored by encoding/json ONLY when the
+// value is addressable — slice/array elements, addressable struct fields, pointer
+// derefs. For a non-addressable value held in an interface{} (a top-level Emit
+// payload, a map value) json ignores the pointer marshaler and encodes the exported
+// fields instead, so we must descend to find binary there rather than treat it as
+// marshaler-owned. rv.CanAddr() mirrors that rule exactly, because
+// reflectHasBinary/transformBinary recurse over the original values whose
+// addressability matches what encoding/json sees.
+func ownsEncoding(rv reflect.Value) bool {
+	t := rv.Type()
 	if t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) {
 		return true
 	}
-	pt := reflect.PtrTo(t)
-	return pt.Implements(jsonMarshalerType) || pt.Implements(textMarshalerType)
+	if rv.CanAddr() {
+		pt := reflect.PointerTo(t)
+		return pt.Implements(jsonMarshalerType) || pt.Implements(textMarshalerType)
+	}
+	return false
 }
 
 // extractBinary returns a JSON-marshalable representation of one event payload in
@@ -322,7 +331,7 @@ func transformBinary(rv reflect.Value, attachments *[][]byte, sentinels map[stri
 	}
 
 	switch rv.Kind() {
-	case reflect.Ptr:
+	case reflect.Pointer:
 		np := reflect.New(rv.Type().Elem())
 		np.Elem().Set(transformBinary(rv.Elem(), attachments, sentinels, nonce, depth-1))
 		return np
@@ -442,7 +451,7 @@ func isEmptyValue(v reflect.Value) bool {
 		return v.Uint() == 0
 	case reflect.Float32, reflect.Float64:
 		return v.Float() == 0
-	case reflect.Interface, reflect.Ptr:
+	case reflect.Interface, reflect.Pointer:
 		return v.IsNil()
 	}
 	return false
