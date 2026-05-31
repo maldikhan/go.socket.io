@@ -186,3 +186,23 @@ func TestSerializeBinary_StructWithUnexportedField(t *testing.T) {
 	// secret is unexported, so it is NOT extracted; no attachment is produced.
 	assert.Len(t, attachments, 0)
 }
+
+// A struct with an EXPORTED []byte reaches reflectExtractBinary's struct walk
+// (the value contains binary), and its unexported sibling field exercises the
+// PkgPath continue while the bytes still become an attachment.
+func TestSerializeBinary_ExportedBinaryWithUnexportedField(t *testing.T) {
+	t.Parallel()
+	parser := NewParser(WithLogger(logger))
+
+	_, attachments, err := parser.SerializeBinary(&socketio_v5.Message{
+		Type: socketio_v5.PacketEvent,
+		NS:   "/",
+		Event: &socketio_v5.Event{
+			Name:     "ev",
+			Payloads: []interface{}{exportedBinaryWithUnexported{File: []byte("x"), secret: "s"}},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, attachments, 1)
+	assert.Equal(t, []byte("x"), attachments[0])
+}

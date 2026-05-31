@@ -151,6 +151,7 @@ func TestSendPacketBinaryFramesAreContiguousUnderConcurrency(t *testing.T) {
 
 	frames := engine.frames
 	headers := 0
+	texts := 0
 	for i := 0; i < len(frames); i++ {
 		f := frames[i]
 		switch {
@@ -174,6 +175,7 @@ func TestSendPacketBinaryFramesAreContiguousUnderConcurrency(t *testing.T) {
 			t.Fatalf("orphan attachment frame %q at %d (not preceded by its header)", f, i)
 		case f == "T":
 			// Standalone text frame is fine anywhere.
+			texts++
 		default:
 			t.Fatalf("unexpected frame %q at %d", f, i)
 		}
@@ -183,9 +185,14 @@ func TestSendPacketBinaryFramesAreContiguousUnderConcurrency(t *testing.T) {
 	if headers == 0 {
 		t.Fatal("expected at least one binary header to be emitted")
 	}
-	expectedFrames := headers*(1+attachments) + (len(frames) - headers*(1+attachments))
+	// Independent reconciliation: every frame is either a binary header, one of
+	// its `attachments` attachment frames, or a standalone text frame. Counting
+	// texts separately makes this a real check (the previous formula reduced to
+	// len(frames) and could never fail).
+	expectedFrames := headers*(1+attachments) + texts
 	if len(frames) != expectedFrames {
-		t.Fatalf("frame accounting mismatch: got %d frames", len(frames))
+		t.Fatalf("frame accounting mismatch: got %d frames, want %d (%d headers x (1+%d attachments) + %d texts)",
+			len(frames), expectedFrames, headers, attachments, texts)
 	}
 }
 

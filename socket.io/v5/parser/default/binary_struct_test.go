@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,6 +40,14 @@ type noBinaryStruct struct {
 type unexportedBinaryStruct struct {
 	secret []byte // unexported: not marshalable, must be ignored
 	Name   string
+}
+
+// exportedBinaryWithUnexported carries an exported []byte (so the value enters
+// reflectExtractBinary's struct handling) alongside an unexported field that the
+// PkgPath check must skip.
+type exportedBinaryWithUnexported struct {
+	File   []byte // exported: extracted as an attachment
+	secret string // unexported: skipped via the PkgPath continue
 }
 
 type cyclic struct {
@@ -156,6 +165,47 @@ func TestSerializeBinary_StructProducesAttachment(t *testing.T) {
 	assert.Contains(t, headerStr, `"Name":"pic"`)
 	// Base64 of {0xde,0xad,0xbe,0xef} is "3q2+7w==" — it must NOT appear.
 	assert.NotContains(t, headerStr, "3q2+7w==")
+}
+
+// A struct that mixes a []byte field with a field relying on a custom
+// json.Marshaler (time.Time -> RFC3339) must extract the bytes as an attachment
+// while keeping the marshaler-driven field encoded exactly as encoding/json
+// would render it on the plain Serialize path — not flattened to "{}" by a blind
+// field-by-field reflection walk.
+func TestSerializeBinary_StructPreservesJSONMarshaler(t *testing.T) {
+	t.Parallel()
+	parser := NewParser(WithLogger(logger))
+
+	type withTime struct {
+		File []byte    `json:"file"`
+		T    time.Time `json:"t"`
+	}
+	data := []byte{0x01, 0x02, 0x03}
+	ts := time.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	wantTS, err := json.Marshal(ts) // exactly what encoding/json would emit
+	require.NoError(t, err)
+
+	event := &socketio_v5.Event{
+		Name:     "upload",
+		Payloads: []interface{}{withTime{File: data, T: ts}},
+	}
+	require.True(t, parser.HasBinary(event))
+
+	header, attachments, err := parser.SerializeBinary(&socketio_v5.Message{
+		Type:  socketio_v5.PacketEvent,
+		NS:    "/",
+		Event: event,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, attachments, 1)
+	assert.True(t, bytes.Equal(data, attachments[0]))
+
+	headerStr := string(header)
+	assert.Contains(t, headerStr, "_placeholder", "the []byte field becomes a placeholder")
+	// time.Time must keep its RFC3339 rendering, NOT collapse to an empty object.
+	assert.Contains(t, headerStr, `"t":`+string(wantTS))
+	assert.NotContains(t, headerStr, `"t":{}`, "json.Marshaler must be honored, not flattened")
 }
 
 // Contrast: a struct without []byte stays on the plain text Serialize path and

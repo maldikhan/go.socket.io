@@ -267,11 +267,26 @@ func reflectExtractBinary(rv reflect.Value, attachments *[][]byte, depth int) in
 		return rv.Interface()
 	}
 
+	// Only hand-serialize subtrees that actually contain a []byte. Anything with
+	// no binary inside is returned via its interface{} so encoding/json renders
+	// it natively, preserving custom json.Marshaler implementations, `json:"..."`
+	// tags, omitempty and embedded fields. This is why a struct{ File []byte; T
+	// time.Time } keeps T as its RFC3339 string instead of the empty object a
+	// blind field-by-field reflection walk would produce. (A []byte leaf reports
+	// true here and falls through to the Slice case below.)
+	if !reflectHasBinary(rv, depth) {
+		return rv.Interface()
+	}
+
+	// Past the guard, rv is known to contain a []byte, so its kind is necessarily
+	// a container: Ptr/Interface (wrapper), Slice/Array/Map, or Struct. Scalars
+	// can never hold binary and have already returned above, so there is no
+	// "default" path to reach here. Struct is handled after the switch as the
+	// remaining container kind.
 	switch rv.Kind() {
 	case reflect.Ptr, reflect.Interface:
-		if rv.IsNil() {
-			return rv.Interface()
-		}
+		// Non-nil: a nil pointer/interface cannot contain binary and was returned
+		// by the guard above.
 		return reflectExtractBinary(rv.Elem(), attachments, depth-1)
 	case reflect.Slice:
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
@@ -298,24 +313,25 @@ func reflectExtractBinary(rv reflect.Value, attachments *[][]byte, depth int) in
 			out[mapKeyString(key)] = reflectExtractBinary(rv.MapIndex(key), attachments, depth-1)
 		}
 		return out
-	case reflect.Struct:
-		t := rv.Type()
-		out := make(map[string]interface{}, rv.NumField())
-		for i := 0; i < rv.NumField(); i++ {
-			field := t.Field(i)
-			if field.PkgPath != "" {
-				continue // unexported
-			}
-			name, omit := jsonFieldName(field)
-			if omit {
-				continue
-			}
-			out[name] = reflectExtractBinary(rv.Field(i), attachments, depth-1)
-		}
-		return out
-	default:
-		return rv.Interface()
 	}
+
+	// Remaining binary-bearing kind: struct. Only exported fields are emitted,
+	// and each field is recursed so a binary-free field (e.g. time.Time) is
+	// returned via the guard and rendered natively by encoding/json.
+	t := rv.Type()
+	out := make(map[string]interface{}, rv.NumField())
+	for i := 0; i < rv.NumField(); i++ {
+		field := t.Field(i)
+		if field.PkgPath != "" {
+			continue // unexported
+		}
+		name, omit := jsonFieldName(field)
+		if omit {
+			continue
+		}
+		out[name] = reflectExtractBinary(rv.Field(i), attachments, depth-1)
+	}
+	return out
 }
 
 // mapKeyString renders a map key as a JSON object key. encoding/json requires
