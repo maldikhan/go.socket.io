@@ -157,6 +157,22 @@ func TestClient_ReceiveBinary_ZeroAttachmentReconstructError(t *testing.T) {
 	client.onMessage([]byte(`50-["ev",{"_placeholder":true,"num":0}]`))
 }
 
+func TestClient_ReceiveBinary_HugeAttachmentCountNoPanic(t *testing.T) {
+	// A malformed/hostile header declares an enormous attachment count (the
+	// parser accepts up to 18 digits). Staging must not use it directly as a
+	// slice capacity — make([][]byte, 0, hugeCount) would panic ("cap out of
+	// range"). The clamped preallocation keeps this a no-op crash-wise: the
+	// header stages and simply waits for attachments that never complete.
+	client, _ := newBinaryClient(t)
+	client.On("ev", func(data []byte) {})
+
+	client.onMessage([]byte(`5999999999999999-["ev",{"_placeholder":true,"num":0}]`))
+
+	// A subsequent real attachment is appended (slice grew via append, not the
+	// huge declared capacity) without completing or panicking.
+	client.onBinaryAttachment([]byte{0x01})
+}
+
 func TestClient_BinaryAttachmentWithoutPending(t *testing.T) {
 	client, _ := newBinaryClient(t)
 	// No pending binary header: the stray attachment is dropped without panic.

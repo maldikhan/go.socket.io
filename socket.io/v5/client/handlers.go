@@ -63,10 +63,27 @@ func (c *Client) stageBinary(msg *socketio_v5.Message) bool {
 	}
 	c.pendingBinary = msg
 	c.pendingNeeded = needed
-	c.pendingAttachments = make([][]byte, 0, needed)
+	// needed comes straight off the wire (the parser accepts up to an 18-digit
+	// count), so it must not be used directly as a slice capacity: a malformed
+	// or hostile header such as "599999999999999999-[...]" would make
+	// make([][]byte, 0, needed) panic ("cap out of range") or attempt a huge
+	// allocation — a remotely triggerable crash. Cap the preallocation; the
+	// slice still grows via append as real attachment frames arrive, and
+	// pendingNeeded keeps the true completion target.
+	prealloc := needed
+	if prealloc > maxPreallocAttachments {
+		prealloc = maxPreallocAttachments
+	}
+	c.pendingAttachments = make([][]byte, 0, prealloc)
 	c.binaryMu.Unlock()
 	return true
 }
+
+// maxPreallocAttachments bounds the capacity preallocated for a staged binary
+// message's attachments, decoupling the allocation from the untrusted on-the-wire
+// attachment count. Real Socket.IO messages carry only a handful of attachments,
+// so this is never a limit in practice.
+const maxPreallocAttachments = 64
 
 // onBinaryAttachment collects a binary attachment frame and, once the staged
 // header has received all of its expected attachments, reconstructs and
