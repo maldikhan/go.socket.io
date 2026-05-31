@@ -1,6 +1,9 @@
 package socketio_v5_parser_default
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,11 +18,23 @@ import (
 // are far shallower than this, so the bound never trips for legitimate data.
 const maxBinaryScanDepth = 100
 
-// rawMessageType is json.RawMessage's reflect type. Although it is a []byte
-// under the hood, it carries pre-encoded JSON that must pass through to
-// encoding/json unchanged — it is NOT a Socket.IO binary attachment. It is
-// matched by reflect type (not the []byte fast path, which a named type skips).
-var rawMessageType = reflect.TypeOf(json.RawMessage(nil))
+var (
+	// byteSliceType is the unnamed []byte type, used to tell a plain []byte from a
+	// named alias (e.g. type Blob []byte) so the latter's type is preserved.
+	byteSliceType = reflect.TypeOf([]byte(nil))
+	// jsonMarshalerType / textMarshalerType are the marshaler interfaces. A value
+	// whose type implements either owns its own encoding (e.g. time.Time ->
+	// RFC3339, json.RawMessage -> verbatim), so its bytes are emitted by that
+	// marshaler and are never lifted into Socket.IO binary attachments.
+	jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+	textMarshalerType = reflect.TypeOf((*interface{ MarshalText() ([]byte, error) })(nil)).Elem()
+)
+
+// sentinelMagic prefixes every binary sentinel slice. Combined with the
+// attachment index it makes each sentinel unique (so its base64 form is a unique
+// needle for splicePlaceholders) and, thanks to the control bytes, astronomically
+// unlikely to collide with real string data in a payload.
+var sentinelMagic = []byte{0x1b, 'S', 'I', 'O', 'B', 'I', 'N', 0x1b}
 
 // ErrParseBinary is returned when binary attachments cannot be reconciled with
 // the placeholders found in a PacketBinaryEvent/PacketBinaryAck payload.
@@ -177,6 +192,14 @@ func reflectHasBinary(rv reflect.Value, depth int) bool {
 		return false
 	}
 
+	// A type that controls its own JSON/text encoding owns its representation;
+	// its bytes go out via that marshaler (e.g. time.Time, json.RawMessage), never
+	// as a binary attachment. For Interface kind rv.Type() is the interface itself
+	// (no marshaler) and the concrete type is re-checked after the deref below.
+	if implementsMarshaler(rv.Type()) {
+		return false
+	}
+
 	switch rv.Kind() {
 	case reflect.Ptr, reflect.Interface:
 		if rv.IsNil() {
@@ -184,12 +207,9 @@ func reflectHasBinary(rv reflect.Value, depth int) bool {
 		}
 		return reflectHasBinary(rv.Elem(), depth-1)
 	case reflect.Slice:
-		// json.RawMessage is pre-encoded JSON, not binary, even though it is a
-		// []byte under the hood.
-		if rv.Type() == rawMessageType {
-			return false
-		}
 		// []byte is the binary leaf; anything else is a slice to descend into.
+		// (json.RawMessage and other marshaler-owned byte slices were already
+		// excluded by the implementsMarshaler check above.)
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
 			return true
 		}
@@ -232,144 +252,199 @@ func reflectHasBinary(rv reflect.Value, depth int) bool {
 	return false
 }
 
-// extractBinary walks a payload value and replaces every []byte with a
-// {"_placeholder":true,"num":N} marker, appending the buffer to *attachments in
-// the order encountered. The returned value is safe to JSON-marshal as the
-// binary event header. Nested slices and maps are traversed; arbitrary structs,
-// pointers and typed containers are handled via reflection so binary inside a
-// Go struct (e.g. struct{ File []byte }) becomes a real attachment rather than
-// a base64 string.
-func extractBinary(value interface{}, attachments *[][]byte) interface{} {
-	switch v := value.(type) {
-	case []byte:
-		num := len(*attachments)
-		*attachments = append(*attachments, v)
-		return map[string]interface{}{"_placeholder": true, "num": num}
-	case map[string]interface{}:
-		out := make(map[string]interface{}, len(v))
-		for key, item := range v {
-			out[key] = extractBinary(item, attachments)
-		}
-		return out
-	case []interface{}:
-		out := make([]interface{}, len(v))
-		for i, item := range v {
-			out[i] = extractBinary(item, attachments)
-		}
-		return out
-	case nil:
-		return nil
-	default:
-		return reflectExtractBinary(reflect.ValueOf(value), attachments, maxBinaryScanDepth)
-	}
+// implementsMarshaler reports whether t (or *t) controls its own JSON or text
+// encoding via json.Marshaler / encoding.TextMarshaler.
+func implementsMarshaler(t reflect.Type) bool {
+	return t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType)
 }
 
-// reflectExtractBinary mirrors extractBinary for arbitrary Go values reached via
-// reflection. It returns a JSON-marshalable tree (maps/slices/scalars) with every
-// []byte replaced by a placeholder and appended to *attachments. Values that
-// cannot contain binary (or once the depth bound is hit) are returned via their
-// interface{} so encoding/json serializes them normally. Only exported struct
-// fields are emitted, matching encoding/json and valueHasBinary.
-func reflectExtractBinary(rv reflect.Value, attachments *[][]byte, depth int) interface{} {
-	if !rv.IsValid() {
-		return nil
+// extractBinary returns a JSON-marshalable representation of one event payload in
+// which every []byte has been lifted into *attachments and replaced by a
+// {"_placeholder":true,"num":N} marker. Payloads with no binary are returned
+// unchanged so encoding/json renders them verbatim.
+//
+// For payloads that DO contain binary, the encoding is delegated to
+// encoding/json: a same-typed copy is built in which each []byte is swapped for a
+// unique sentinel, the copy is marshaled (so json tags, omitempty, ,string,
+// embedded fields and json.Marshaler implementations are honored exactly as on
+// the text Serialize path), and the sentinels' base64 renderings are spliced back
+// into placeholder objects. The header is therefore byte-for-byte identical to
+// the non-binary path apart from the lifted buffers.
+func extractBinary(value interface{}, attachments *[][]byte) (interface{}, error) {
+	if !valueHasBinary(value) {
+		return value, nil
 	}
-	if depth <= 0 {
-		return rv.Interface()
+	sentinels := make(map[string]int)
+	transformed := transformBinary(reflect.ValueOf(value), attachments, sentinels, maxBinaryScanDepth)
+	data, err := json.Marshal(transformed.Interface())
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrParseBinary, err)
+	}
+	return json.RawMessage(splicePlaceholders(data, sentinels)), nil
+}
+
+// transformBinary returns a value of the SAME type as rv in which every []byte on
+// a binary-bearing path is replaced by a unique sentinel slice; each sentinel's
+// base64 rendering is recorded in sentinels (keyed to its attachment index) and
+// the original bytes are appended to *attachments. Subtrees with no binary (or
+// whose type owns its encoding, or once the depth bound is hit) are returned
+// unchanged and shared with the original — they are never mutated, because only
+// freshly built containers are ever written to.
+func transformBinary(rv reflect.Value, attachments *[][]byte, sentinels map[string]int, depth int) reflect.Value {
+	if depth <= 0 || !rv.IsValid() || !reflectHasBinary(rv, depth) {
+		return rv
 	}
 
-	// Only hand-serialize subtrees that actually contain a []byte. Anything with
-	// no binary inside is returned via its interface{} so encoding/json renders
-	// it natively, preserving custom json.Marshaler implementations, `json:"..."`
-	// tags, omitempty and embedded fields. This is why a struct{ File []byte; T
-	// time.Time } keeps T as its RFC3339 string instead of the empty object a
-	// blind field-by-field reflection walk would produce. (A []byte leaf reports
-	// true here and falls through to the Slice case below.)
-	if !reflectHasBinary(rv, depth) {
-		return rv.Interface()
-	}
-
-	// Past the guard, rv is known to contain a []byte, so its kind is necessarily
-	// a container: Ptr/Interface (wrapper), Slice/Array/Map, or Struct. Scalars
-	// can never hold binary and have already returned above, so there is no
-	// "default" path to reach here. Struct is handled after the switch as the
-	// remaining container kind.
 	switch rv.Kind() {
-	case reflect.Ptr, reflect.Interface:
-		// Non-nil: a nil pointer/interface cannot contain binary and was returned
-		// by the guard above.
-		return reflectExtractBinary(rv.Elem(), attachments, depth-1)
+	case reflect.Ptr:
+		np := reflect.New(rv.Type().Elem())
+		np.Elem().Set(transformBinary(rv.Elem(), attachments, sentinels, depth-1))
+		return np
+	case reflect.Interface:
+		out := reflect.New(rv.Type()).Elem()
+		out.Set(transformBinary(rv.Elem(), attachments, sentinels, depth-1))
+		return out
 	case reflect.Slice:
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
-			// []byte leaf -> attachment + placeholder.
-			buf := rv.Bytes()
-			num := len(*attachments)
-			*attachments = append(*attachments, buf)
-			return map[string]interface{}{"_placeholder": true, "num": num}
+			return sentinelSlice(rv, attachments, sentinels)
 		}
-		out := make([]interface{}, rv.Len())
+		ns := reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
 		for i := 0; i < rv.Len(); i++ {
-			out[i] = reflectExtractBinary(rv.Index(i), attachments, depth-1)
+			ns.Index(i).Set(transformBinary(rv.Index(i), attachments, sentinels, depth-1))
 		}
-		return out
+		return ns
 	case reflect.Array:
-		out := make([]interface{}, rv.Len())
+		na := reflect.New(rv.Type()).Elem()
 		for i := 0; i < rv.Len(); i++ {
-			out[i] = reflectExtractBinary(rv.Index(i), attachments, depth-1)
+			na.Index(i).Set(transformBinary(rv.Index(i), attachments, sentinels, depth-1))
 		}
-		return out
+		return na
 	case reflect.Map:
-		out := make(map[string]interface{}, rv.Len())
+		nm := reflect.MakeMap(rv.Type())
 		for _, key := range rv.MapKeys() {
-			out[mapKeyString(key)] = reflectExtractBinary(rv.MapIndex(key), attachments, depth-1)
+			nm.SetMapIndex(key, transformBinary(rv.MapIndex(key), attachments, sentinels, depth-1))
 		}
-		return out
+		return nm
 	}
 
-	// Remaining binary-bearing kind: struct. Only exported fields are emitted,
-	// and each field is recursed so a binary-free field (e.g. time.Time) is
-	// returned via the guard and rendered natively by encoding/json.
+	// Remaining binary-bearing kind: struct. A same-typed copy is built so json
+	// applies the real field tags during marshaling; only exported fields are
+	// copied (matching json and valueHasBinary), `json:"-"` fields are dropped,
+	// and an omitempty field that json would omit is left zero so it stays omitted
+	// rather than being forced in by a (non-empty) sentinel.
+	ns := reflect.New(rv.Type()).Elem()
 	t := rv.Type()
-	out := make(map[string]interface{}, rv.NumField())
 	for i := 0; i < rv.NumField(); i++ {
 		field := t.Field(i)
 		if field.PkgPath != "" {
 			continue // unexported
 		}
-		name, omit := jsonFieldName(field)
-		if omit {
+		skip, omitempty := jsonFieldOptions(field)
+		if skip {
 			continue
 		}
-		out[name] = reflectExtractBinary(rv.Field(i), attachments, depth-1)
+		fv := rv.Field(i)
+		if omitempty && isEmptyValue(fv) {
+			continue
+		}
+		ns.Field(i).Set(transformBinary(fv, attachments, sentinels, depth-1))
 	}
-	return out
+	return ns
 }
 
-// mapKeyString renders a map key as a JSON object key. encoding/json requires
-// map keys to be strings (or types implementing TextMarshaler / integer kinds);
-// fmt.Sprint reproduces the string and integer renderings json uses, which is
-// all that is needed to carry binary placeholders out of a typed map.
-func mapKeyString(key reflect.Value) string {
-	return fmt.Sprint(key.Interface())
+// sentinelSlice records rv's bytes as the next attachment and returns a same-typed
+// slice holding a unique sentinel. encoding/json renders the sentinel as a base64
+// string, which splicePlaceholders then rewrites into the placeholder object.
+func sentinelSlice(rv reflect.Value, attachments *[][]byte, sentinels map[string]int) reflect.Value {
+	orig := rv.Bytes()
+	buf := make([]byte, len(orig))
+	copy(buf, orig)
+	num := len(*attachments)
+	*attachments = append(*attachments, buf)
+
+	sentinel := makeSentinel(num)
+	sentinels[base64.StdEncoding.EncodeToString(sentinel)] = num
+
+	sv := reflect.ValueOf(sentinel)
+	if rv.Type() != byteSliceType {
+		// Preserve a named []byte type (e.g. type Blob []byte) so the copy stays
+		// assignable to its field/element.
+		sv = sv.Convert(rv.Type())
+	}
+	return sv
 }
 
-// jsonFieldName returns the JSON object key for a struct field, honoring a
-// `json:"name,options"` tag. A `json:"-"` tag omits the field (the obscure
-// `json:"-,"` literal-dash form is not supported; it is vanishingly rare and not
-// needed for binary payloads). An empty tag name falls back to the field name.
-func jsonFieldName(field reflect.StructField) (string, bool) {
+// makeSentinel builds the unique, marshaling-stable byte token for attachment num
+// (see sentinelMagic).
+func makeSentinel(num int) []byte {
+	s := make([]byte, len(sentinelMagic)+8)
+	copy(s, sentinelMagic)
+	binary.BigEndian.PutUint64(s[len(sentinelMagic):], uint64(num))
+	return s
+}
+
+// splicePlaceholders rewrites each sentinel's base64 JSON string ("<b64>") into a
+// {"_placeholder":true,"num":N} object. Each sentinel is unique, so it appears
+// exactly once.
+func splicePlaceholders(data []byte, sentinels map[string]int) []byte {
+	for b64, num := range sentinels {
+		needle := []byte(`"` + b64 + `"`)
+		repl := []byte(fmt.Sprintf(`{"_placeholder":true,"num":%d}`, num))
+		data = bytes.Replace(data, needle, repl, 1)
+	}
+	return data
+}
+
+// isEmptyValue mirrors encoding/json's emptiness test for omitempty so the binary
+// path omits exactly the fields the text path would.
+func isEmptyValue(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+		return v.Len() == 0
+	case reflect.Bool:
+		return !v.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return v.Int() == 0
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return v.Uint() == 0
+	case reflect.Float32, reflect.Float64:
+		return v.Float() == 0
+	case reflect.Interface, reflect.Ptr:
+		return v.IsNil()
+	}
+	return false
+}
+
+// jsonFieldOptions reports whether a struct field is dropped by `json:"-"` and
+// whether it carries the omitempty option. The field name is not needed:
+// transformBinary copies into the same struct type, so encoding/json applies the
+// real tag (name, ,string, etc.) when it marshals.
+func jsonFieldOptions(field reflect.StructField) (skip, omitempty bool) {
 	tag := field.Tag.Get("json")
 	if tag == "-" {
-		return "", true
+		return true, false
 	}
-	name := tag
 	if comma := indexComma(tag); comma >= 0 {
-		name = tag[:comma]
+		omitempty = hasOmitempty(tag[comma+1:])
 	}
-	if name == "" {
-		return field.Name, false
+	return false, omitempty
+}
+
+// hasOmitempty reports whether the comma-separated json tag options contain
+// "omitempty".
+func hasOmitempty(opts string) bool {
+	for opts != "" {
+		var part string
+		if i := indexComma(opts); i >= 0 {
+			part, opts = opts[:i], opts[i+1:]
+		} else {
+			part, opts = opts, ""
+		}
+		if part == "omitempty" {
+			return true
+		}
 	}
-	return name, false
+	return false
 }
 
 // indexComma returns the index of the first comma in s, or -1. (Avoids pulling
@@ -407,7 +482,11 @@ func (p *SocketIOV5DefaultParser) SerializeBinary(msg *socketio_v5.Message) ([]b
 	var attachments [][]byte
 	placeholders := make([]interface{}, len(msg.Event.Payloads))
 	for i, payload := range msg.Event.Payloads {
-		placeholders[i] = extractBinary(payload, &attachments)
+		pv, err := extractBinary(payload, &attachments)
+		if err != nil {
+			return nil, nil, err
+		}
+		placeholders[i] = pv
 	}
 
 	count := len(attachments)

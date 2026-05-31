@@ -258,6 +258,37 @@ func TestSerializeBinary_RawMessageStaysInline(t *testing.T) {
 	assert.Contains(t, headerStr, `"num":0`)
 }
 
+// A binary-bearing struct must honor json tag OPTIONS (,string and ,omitempty)
+// exactly as the text Serialize path would, since the hybrid send path delegates
+// the encoding to encoding/json. This is the regression Codex flagged: previously
+// the manual walk kept only the field name and dropped the options.
+func TestSerializeBinary_HonorsJSONTagOptions(t *testing.T) {
+	t.Parallel()
+	parser := NewParser(WithLogger(logger))
+
+	type tagged struct {
+		File []byte `json:"file"`
+		ID   int    `json:"id,string"`      // ,string -> numeric value quoted
+		Note string `json:"note,omitempty"` // empty -> omitted entirely
+	}
+	event := &socketio_v5.Event{
+		Name:     "upload",
+		Payloads: []interface{}{tagged{File: []byte{0x01}, ID: 7, Note: ""}},
+	}
+	require.True(t, parser.HasBinary(event))
+
+	header, attachments, err := parser.SerializeBinary(&socketio_v5.Message{
+		Type: socketio_v5.PacketEvent, NS: "/", Event: event,
+	})
+	require.NoError(t, err)
+	require.Len(t, attachments, 1)
+
+	headerStr := string(header)
+	assert.Contains(t, headerStr, `"id":"7"`, ",string option must quote the number")
+	assert.NotContains(t, headerStr, `"note"`, "empty omitempty field must be dropped")
+	assert.Contains(t, headerStr, `"file":{"_placeholder":true,"num":0}`)
+}
+
 // Contrast: a struct without []byte stays on the plain text Serialize path and
 // (if it ever went through SerializeBinary) yields zero attachments.
 func TestSerialize_NonBinaryStructStaysText(t *testing.T) {

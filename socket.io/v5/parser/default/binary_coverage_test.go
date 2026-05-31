@@ -124,40 +124,116 @@ func TestWrapCallback_MarshalErrorSkipped(t *testing.T) {
 	assert.False(t, called)
 }
 
-// Direct unit tests of extractBinary's reflective leaf cases that are awkward to
-// trigger end-to-end: a nil pointer leaf and the depth bound.
+// Direct unit tests of extractBinary's leaf cases that are awkward to trigger
+// end-to-end: a binary-free typed nil pointer, and transformBinary's depth /
+// invalid-value guards.
 func TestExtractBinary_NilPointerLeaf(t *testing.T) {
 	t.Parallel()
 	var attachments [][]byte
 	var nilPtr *[]byte
-	// A typed nil pointer reaches reflectExtractBinary's Ptr/IsNil branch and is
-	// returned as-is, producing no attachment.
-	out := extractBinary(nilPtr, &attachments)
+	// A typed nil pointer contains no binary, so extractBinary returns it as-is
+	// (json renders it as null) with no attachment.
+	out, err := extractBinary(nilPtr, &attachments)
+	require.NoError(t, err)
 	assert.Len(t, attachments, 0)
 	assert.Nil(t, out)
 }
 
-func TestReflectExtractBinary_DepthBound(t *testing.T) {
+func TestTransformBinary_DepthBound(t *testing.T) {
 	t.Parallel()
 	var attachments [][]byte
-	// depth == 0 returns the value via Interface() without recursing.
-	out := reflectExtractBinary(reflect.ValueOf("x"), &attachments, 0)
-	assert.Equal(t, "x", out)
+	sentinels := map[string]int{}
+	// depth == 0 returns the value unchanged without recursing.
+	out := transformBinary(reflect.ValueOf("x"), &attachments, sentinels, 0)
+	assert.Equal(t, "x", out.Interface())
 	assert.Len(t, attachments, 0)
 }
 
-func TestReflectExtractBinary_InvalidValue(t *testing.T) {
+func TestTransformBinary_InvalidValue(t *testing.T) {
 	t.Parallel()
 	var attachments [][]byte
-	// An invalid reflect.Value (the zero Value) returns nil.
-	out := reflectExtractBinary(reflect.Value{}, &attachments, 5)
-	assert.Nil(t, out)
+	sentinels := map[string]int{}
+	// An invalid reflect.Value (the zero Value) is returned as-is, no panic.
+	out := transformBinary(reflect.Value{}, &attachments, sentinels, 5)
+	assert.False(t, out.IsValid())
 	assert.Len(t, attachments, 0)
+}
+
+// blobType is a named []byte alias, exercising sentinelSlice's type-preserving
+// Convert branch.
+type blobType []byte
+
+// transformKinds drives the remaining transformBinary / isEmptyValue / hasOmitempty
+// branches in one binary-bearing struct: a named []byte (Convert), an array of
+// []byte (Array case), a map of []byte (Map case), omitempty fields of every
+// emptiness kind (all skipped), a struct-typed omitempty field (isEmptyValue
+// default -> not skipped), and a multi-option tag (hasOmitempty continuation).
+type transformKinds struct {
+	File  []byte            `json:"file"`
+	Named blobType          `json:"named"`
+	Arr   [2][]byte         `json:"arr"`
+	M     map[string][]byte `json:"m"`
+
+	S     string         `json:"s,omitempty"`
+	B     bool           `json:"b,omitempty"`
+	I     int            `json:"i,omitempty"`
+	U     uint           `json:"u,omitempty"`
+	F     float64        `json:"f,omitempty"`
+	Sl    []int          `json:"sl,omitempty"`
+	Mp    map[string]int `json:"mp,omitempty"`
+	P     *int           `json:"p,omitempty"`
+	If    interface{}    `json:"if,omitempty"`
+	ArrO  [0]int         `json:"arro,omitempty"`
+	Multi int            `json:"multi,string,omitempty"`
+
+	Keep struct{ X int } `json:"keep,omitempty"` // struct kind: never "empty"
+}
+
+func TestSerializeBinary_TransformKindsCoverage(t *testing.T) {
+	t.Parallel()
+	parser := NewParser(WithLogger(logger))
+
+	payload := transformKinds{
+		File:  []byte("f"),
+		Named: blobType("n"),
+		Arr:   [2][]byte{[]byte("a0"), []byte("a1")},
+		M:     map[string][]byte{"k": []byte("mv")},
+		// all omitempty scalar/container fields left empty -> omitted
+	}
+	header, attachments, err := parser.SerializeBinary(&socketio_v5.Message{
+		Type: socketio_v5.PacketEvent, NS: "/", Event: &socketio_v5.Event{
+			Name: "ev", Payloads: []interface{}{payload},
+		},
+	})
+	require.NoError(t, err)
+	// File + Named + Arr(2) + M(1) = 5 attachments.
+	require.Len(t, attachments, 5)
+
+	headerStr := string(header)
+	// Empty omitempty fields are dropped; the struct-typed field is kept.
+	assert.NotContains(t, headerStr, `"s"`)
+	assert.NotContains(t, headerStr, `"multi"`)
+	assert.Contains(t, headerStr, `"keep"`)
+	assert.Contains(t, headerStr, `"_placeholder"`)
+}
+
+// extractBinary surfaces a json.Marshal error for a binary-bearing payload whose
+// non-binary part is unencodable (a func field), covering the error branch.
+func TestExtractBinary_MarshalError(t *testing.T) {
+	t.Parallel()
+	type withFunc struct {
+		File []byte
+		Fn   func() `json:"fn"`
+	}
+	var attachments [][]byte
+	_, err := extractBinary(withFunc{File: []byte("x"), Fn: func() {}}, &attachments)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrParseBinary)
 }
 
 // reflectHasBinary: a typed map with NO binary must return false (the Map-case
-// fall-through), and reflectExtractBinary must skip unexported struct fields
-// (the PkgPath continue) when reached through the reflective path.
+// fall-through), and the reflective path must skip unexported struct fields
+// (the PkgPath continue).
 func TestHasBinary_TypedMapWithoutBinary(t *testing.T) {
 	t.Parallel()
 	parser := NewParser(WithLogger(logger))
