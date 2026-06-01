@@ -185,7 +185,7 @@ func TestTransformBinary_InvalidValue(t *testing.T) {
 }
 
 // blobType is a named []byte alias, exercising sentinelSlice's type-preserving
-// Convert branch.
+// named-byte-slice branch.
 type blobType []byte
 
 // transformKinds drives the remaining transformBinary / isEmptyValue / hasOmitempty

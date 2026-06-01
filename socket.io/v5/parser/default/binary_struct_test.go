@@ -415,6 +415,33 @@ func TestSerializeBinary_PointerMarshalerNonAddressableLiftsBinary(t *testing.T)
 	})
 }
 
+// octet is a defined uint8 type; []octet is a byte slice whose element type is
+// named. encoding/json base64-encodes it like []byte, so the binary path lifts it
+// into an attachment — but []byte is not convertible to []octet, so sentinelSlice
+// must build the same-typed slice element by element rather than Convert.
+type octet uint8
+
+// Regression (Codex P2, binary.go:427): emitting a slice of a named uint8 element
+// must not panic in sentinelSlice and must lift the bytes into a binary attachment.
+func TestSerializeBinary_NamedUint8ElementSliceNoPanic(t *testing.T) {
+	t.Parallel()
+	parser := NewParser(WithLogger(logger))
+
+	event := &socketio_v5.Event{
+		Name:     "upload",
+		Payloads: []interface{}{[]octet{1, 2, 255}},
+	}
+	require.True(t, parser.HasBinary(event))
+
+	header, attachments, err := parser.SerializeBinary(&socketio_v5.Message{
+		Type: socketio_v5.PacketEvent, NS: "/", Event: event,
+	})
+	require.NoError(t, err)
+	require.Len(t, attachments, 1)
+	assert.Equal(t, []byte{1, 2, 255}, attachments[0])
+	assert.Contains(t, string(header), `{"_placeholder":true,"num":0}`)
+}
+
 // Contrast: a struct without []byte stays on the plain text Serialize path and
 // (if it ever went through SerializeBinary) yields zero attachments.
 func TestSerialize_NonBinaryStructStaysText(t *testing.T) {

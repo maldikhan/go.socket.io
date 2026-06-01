@@ -421,12 +421,19 @@ func sentinelSlice(rv reflect.Value, attachments *[][]byte, sentinels map[string
 	sentinels[base64.StdEncoding.EncodeToString(sentinel)] = num
 
 	sv := reflect.ValueOf(sentinel)
-	if rv.Type() != byteSliceType {
-		// Preserve a named []byte type (e.g. type Blob []byte) so the copy stays
-		// assignable to its field/element.
-		sv = sv.Convert(rv.Type())
+	if rv.Type() == byteSliceType {
+		return sv
 	}
-	return sv
+	// rv is a named byte-slice type. A type whose underlying type is []byte
+	// (e.g. type Blob []byte) is convertible from []byte, but a slice of a *named*
+	// uint8 element (e.g. type Octet uint8; []Octet) is NOT — sv.Convert would
+	// panic. Build the same-typed slice element by element instead, which works
+	// for both; encoding/json still renders it as the sentinel's base64 needle.
+	named := reflect.MakeSlice(rv.Type(), len(sentinel), len(sentinel))
+	for i, b := range sentinel {
+		named.Index(i).SetUint(uint64(b))
+	}
+	return named
 }
 
 // makeSentinel builds the unique, marshaling-stable byte token for attachment num:
