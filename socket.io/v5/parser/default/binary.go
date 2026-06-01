@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 
 	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
@@ -142,11 +143,15 @@ func asPlaceholder(m map[string]interface{}, attachments [][]byte) ([]byte, bool
 	if !ok {
 		return nil, false, fmt.Errorf("%w: %v", ErrParseBinary, errors.New("placeholder num is not a number"))
 	}
-	idx := int(num)
-	if idx < 0 || idx >= len(attachments) {
-		return nil, false, fmt.Errorf("%w: placeholder index %d out of range", ErrParseBinary, idx)
+	// num arrives as a JSON number (float64) straight off the wire. Reject a
+	// fractional, negative, or out-of-range value rather than letting int(num)
+	// silently truncate it (e.g. 1.5 -> 1, substituting the wrong attachment) or
+	// overflow on a huge value and index out of bounds. Comparing as float64
+	// before converting keeps int(num) exact and in range.
+	if num != math.Trunc(num) || num < 0 || num >= float64(len(attachments)) {
+		return nil, false, fmt.Errorf("%w: placeholder num %v is not a valid attachment index", ErrParseBinary, num)
 	}
-	return attachments[idx], true, nil
+	return attachments[int(num)], true, nil
 }
 
 // HasBinary reports whether the event carries any []byte payload that requires

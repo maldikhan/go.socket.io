@@ -383,6 +383,20 @@ func TestParser_ReconstructBinary(t *testing.T) {
 		assert.ErrorIs(t, p.ReconstructBinary(msg, [][]byte{{1}}), ErrParseBinary)
 	})
 
+	t.Run("placeholder num is fractional", func(t *testing.T) {
+		// A non-integer index must be rejected, not truncated by int(num) to a
+		// wrong attachment.
+		msg := &socketio_v5.Message{
+			Type:              socketio_v5.PacketBinaryEvent,
+			BinaryAttachments: intPtr(2),
+			Event: &socketio_v5.Event{
+				Name:     "x",
+				Payloads: []interface{}{json.RawMessage(`{"_placeholder":true,"num":1.5}`)},
+			},
+		}
+		assert.ErrorIs(t, p.ReconstructBinary(msg, [][]byte{{1}, {2}}), ErrParseBinary)
+	})
+
 	t.Run("placeholder without num", func(t *testing.T) {
 		msg := &socketio_v5.Message{
 			Type:              socketio_v5.PacketBinaryEvent,
