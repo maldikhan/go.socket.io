@@ -107,6 +107,30 @@ func TestHasBinary_DepthBound(t *testing.T) {
 	}))
 }
 
+// valueHasBinary fast-path depth bound (Codex P2, binary.go:181): a
+// self-referential map[string]interface{} / []interface{} is handed to HasBinary
+// before encoding/json can reject the cycle, so the map/slice fast paths must be
+// depth-bounded too — otherwise scanning for binary recurses forever and
+// overflows the stack. Both shapes must terminate and report no binary.
+func TestHasBinary_FastPathCycleTerminates(t *testing.T) {
+	t.Parallel()
+	parser := NewParser(WithLogger(logger))
+
+	cyclicMap := map[string]interface{}{}
+	cyclicMap["self"] = cyclicMap
+	assert.False(t, parser.HasBinary(&socketio_v5.Event{
+		Name:     "ev",
+		Payloads: []interface{}{cyclicMap},
+	}))
+
+	cyclicSlice := make([]interface{}, 1)
+	cyclicSlice[0] = cyclicSlice
+	assert.False(t, parser.HasBinary(&socketio_v5.Event{
+		Name:     "ev",
+		Payloads: []interface{}{cyclicSlice},
+	}))
+}
+
 // WrapCallback: the json.Marshal-error fallback path. A reconstructed value that
 // cannot be marshaled (contains a channel) and is not assignable must be
 // reported and skipped without panicking.

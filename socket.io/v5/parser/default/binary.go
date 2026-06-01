@@ -170,6 +170,19 @@ func (p *SocketIOV5DefaultParser) HasBinary(event *socketio_v5.Event) bool {
 // found. This is what lets Emit("upload", struct{ File []byte }{...}) be encoded
 // as a real binary packet instead of base64-stringifying the bytes.
 func valueHasBinary(value interface{}) bool {
+	return valueHasBinaryDepth(value, maxBinaryScanDepth)
+}
+
+// valueHasBinaryDepth is valueHasBinary with an explicit recursion bound. The
+// depth is threaded through the map/slice fast paths (not just the reflect path)
+// so a self-referential map[string]interface{} / []interface{} — which Emit hands
+// to HasBinary before encoding/json gets a chance to reject the cycle — can never
+// overflow the stack; it simply stops at the bound and reports no binary, exactly
+// as reflectHasBinary does for cyclic structures reached via pointers/interfaces.
+func valueHasBinaryDepth(value interface{}, depth int) bool {
+	if depth <= 0 {
+		return false
+	}
 	// Fast paths for the common, already-decoded shapes avoid the reflect cost.
 	switch v := value.(type) {
 	case nil:
@@ -178,20 +191,20 @@ func valueHasBinary(value interface{}) bool {
 		return true
 	case map[string]interface{}:
 		for _, item := range v {
-			if valueHasBinary(item) {
+			if valueHasBinaryDepth(item, depth-1) {
 				return true
 			}
 		}
 		return false
 	case []interface{}:
 		for _, item := range v {
-			if valueHasBinary(item) {
+			if valueHasBinaryDepth(item, depth-1) {
 				return true
 			}
 		}
 		return false
 	}
-	return reflectHasBinary(reflect.ValueOf(value), maxBinaryScanDepth)
+	return reflectHasBinary(reflect.ValueOf(value), depth)
 }
 
 // reflectHasBinary walks an arbitrary reflect.Value looking for a []byte leaf.
