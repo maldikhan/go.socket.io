@@ -61,15 +61,24 @@ func (c *Client) stageBinary(msg *socketio_v5.Message) bool {
 		}
 		return false
 	}
+	// needed is the completion target taken straight off the wire (the parser
+	// accepts up to an 18-digit count). Reject an unrealistic count: it not only
+	// can't be used as a slice capacity, it must not become pendingNeeded either —
+	// otherwise onBinaryAttachment would keep copying and retaining every frame a
+	// hostile peer streams toward a target that never arrives, pinning unbounded
+	// memory. No realistic Socket.IO event carries this many attachments, so drop
+	// the message without staging.
+	if needed > maxBinaryAttachments {
+		c.clearPendingLocked()
+		c.binaryMu.Unlock()
+		c.logger.Errorf("binary header declares %d attachments, exceeding the maximum of %d; dropping message", needed, maxBinaryAttachments)
+		return true
+	}
 	c.pendingBinary = msg
 	c.pendingNeeded = needed
-	// needed comes straight off the wire (the parser accepts up to an 18-digit
-	// count), so it must not be used directly as a slice capacity: a malformed
-	// or hostile header such as "599999999999999999-[...]" would make
-	// make([][]byte, 0, needed) panic ("cap out of range") or attempt a huge
-	// allocation — a remotely triggerable crash. Cap the preallocation; the
-	// slice still grows via append as real attachment frames arrive, and
-	// pendingNeeded keeps the true completion target.
+	// Bound the preallocation independently: even a within-limit count should not
+	// be trusted as an exact capacity hint. The slice still grows via append as
+	// real attachment frames arrive.
 	prealloc := needed
 	if prealloc > maxPreallocAttachments {
 		prealloc = maxPreallocAttachments
@@ -79,11 +88,21 @@ func (c *Client) stageBinary(msg *socketio_v5.Message) bool {
 	return true
 }
 
-// maxPreallocAttachments bounds the capacity preallocated for a staged binary
-// message's attachments, decoupling the allocation from the untrusted on-the-wire
-// attachment count. Real Socket.IO messages carry only a handful of attachments,
-// so this is never a limit in practice.
-const maxPreallocAttachments = 64
+const (
+	// maxBinaryAttachments bounds the attachment count a binary header may declare.
+	// The count is the completion target the client collects toward, so an
+	// unrealistic wire value would let a hostile peer pin unbounded memory by
+	// streaming frames that never reach the target. No legitimate Socket.IO event
+	// carries anywhere near this many []byte payloads, so it never trips in
+	// practice while rejecting absurd counts (e.g. an 18-digit header).
+	maxBinaryAttachments = 1 << 16
+
+	// maxPreallocAttachments bounds the capacity preallocated for a staged binary
+	// message's attachments, decoupling the allocation from the (now range-checked)
+	// on-the-wire attachment count. Real Socket.IO messages carry only a handful of
+	// attachments, so this is never a limit in practice.
+	maxPreallocAttachments = 64
+)
 
 // onBinaryAttachment collects a binary attachment frame and, once the staged
 // header has received all of its expected attachments, reconstructs and

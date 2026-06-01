@@ -157,19 +157,36 @@ func TestClient_ReceiveBinary_ZeroAttachmentReconstructError(t *testing.T) {
 	client.onMessage([]byte(`50-["ev",{"_placeholder":true,"num":0}]`))
 }
 
-func TestClient_ReceiveBinary_HugeAttachmentCountNoPanic(t *testing.T) {
-	// A malformed/hostile header declares an enormous attachment count (the
-	// parser accepts up to 18 digits). Staging must not use it directly as a
-	// slice capacity — make([][]byte, 0, hugeCount) would panic ("cap out of
-	// range"). The clamped preallocation keeps this a no-op crash-wise: the
-	// header stages and simply waits for attachments that never complete.
+func TestClient_ReceiveBinary_HugeAttachmentCountRejected(t *testing.T) {
+	// A malformed/hostile header declares an enormous attachment count (the parser
+	// accepts up to 18 digits). It must be rejected outright, not staged: it can't
+	// be a slice capacity (make([][]byte, 0, hugeCount) panics) and must not become
+	// the completion target either, or a peer could pin unbounded memory streaming
+	// frames toward it. The message is dropped and never dispatched.
 	client, _ := newBinaryClient(t)
-	client.On("ev", func(data []byte) {})
+	dispatched := make(chan struct{}, 1)
+	client.On("ev", func(data []byte) { dispatched <- struct{}{} })
 
 	client.onMessage([]byte(`5999999999999999-["ev",{"_placeholder":true,"num":0}]`))
 
-	// A subsequent real attachment is appended (slice grew via append, not the
-	// huge declared capacity) without completing or panicking.
+	// A stray attachment now has no pending header to attach to; both are dropped
+	// without panicking, and the event is never delivered.
+	client.onBinaryAttachment([]byte{0x01})
+	select {
+	case <-dispatched:
+		t.Fatal("message with an unrealistic attachment count must not be dispatched")
+	default:
+	}
+}
+
+func TestClient_ReceiveBinary_AttachmentCountWithinLimitStages(t *testing.T) {
+	// A large-but-within-limit count (above the preallocation cap, below the
+	// attachment maximum) is staged with a clamped preallocation and grows via
+	// append; it neither panics nor over-allocates while waiting to complete.
+	client, _ := newBinaryClient(t)
+	client.On("ev", func(data []byte) {})
+
+	client.onMessage([]byte(`5100-["ev",{"_placeholder":true,"num":0}]`))
 	client.onBinaryAttachment([]byte{0x01})
 }
 
