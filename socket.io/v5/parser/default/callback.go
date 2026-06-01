@@ -43,6 +43,16 @@ func (p *SocketIOV5DefaultParser) WrapCallback(callback interface{}) func(in []i
 			// (the fast path for []byte and map[string]interface{} handlers).
 			data, isRaw := in[i].(json.RawMessage)
 			if !isRaw {
+				if in[i] == nil {
+					// A reconstructed JSON null arrives as a nil interface{}, for which
+					// reflect.ValueOf is invalid. Mirror json.Unmarshal("null", ...),
+					// which leaves the target at its zero value for any type (nil for
+					// pointers/interfaces/maps/slices), so a null argument alongside a
+					// binary attachment behaves exactly as it does on the non-binary
+					// path instead of being rejected as "wrong data".
+					args[i] = reflect.Zero(argType)
+					continue
+				}
 				argValueOf := reflect.ValueOf(in[i])
 				if argValueOf.IsValid() && argValueOf.Type().AssignableTo(argType) {
 					args[i] = argValueOf

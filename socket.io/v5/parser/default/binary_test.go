@@ -61,6 +61,42 @@ func TestParser_WrapCallback_Binary(t *testing.T) {
 		cb([]interface{}{json.RawMessage(`"not-an-int"`)})
 		assert.False(t, called, "malformed json must not invoke the handler")
 	})
+
+	// A reconstructed JSON null arrives as a nil interface{} alongside a binary
+	// attachment; it must bind to the zero value (mirroring json.Unmarshal("null"))
+	// rather than reject the handler, just as on the non-binary path.
+	t.Run("null argument bound to interface is nil", func(t *testing.T) {
+		called := false
+		var gotV interface{} = "x"
+		var gotB []byte
+		cb := p.WrapCallback(func(v interface{}, b []byte) { called = true; gotV = v; gotB = b })
+		require.NotNil(t, cb)
+		cb([]interface{}{nil, []byte("d")})
+		require.True(t, called, "a null argument must not reject a binary callback")
+		assert.Nil(t, gotV)
+		assert.Equal(t, []byte("d"), gotB)
+	})
+
+	t.Run("null argument bound to pointer is nil", func(t *testing.T) {
+		type dto struct{ X int }
+		called := false
+		gotP := &dto{X: 1}
+		cb := p.WrapCallback(func(v *dto) { called = true; gotP = v })
+		require.NotNil(t, cb)
+		cb([]interface{}{nil})
+		require.True(t, called)
+		assert.Nil(t, gotP, "json null binds to a nil pointer")
+	})
+
+	t.Run("null argument bound to non-nilable param is zero", func(t *testing.T) {
+		called := false
+		got := -1
+		cb := p.WrapCallback(func(n int) { called = true; got = n })
+		require.NotNil(t, cb)
+		cb([]interface{}{nil})
+		require.True(t, called, "json null binds to the zero value for non-nilable types")
+		assert.Equal(t, 0, got)
+	})
 }
 
 // TestParser_WrapCallback_NestedBinary verifies that a typed handler receives
