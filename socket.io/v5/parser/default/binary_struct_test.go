@@ -3,6 +3,7 @@ package socketio_v5_parser_default
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -440,6 +441,52 @@ func TestSerializeBinary_NamedUint8ElementSliceNoPanic(t *testing.T) {
 	require.Len(t, attachments, 1)
 	assert.Equal(t, []byte{1, 2, 255}, attachments[0])
 	assert.Contains(t, string(header), `{"_placeholder":true,"num":0}`)
+}
+
+// Regression (Codex P2, binary.go struct transform): a []byte field that
+// encoding/json drops (here via a json tag/name conflict) must NOT be lifted into
+// an orphan attachment. The attachment list is finalized against the marshaled
+// output, so a sentinel that never appears is discarded — the binary header stays
+// consistent (zero attachments, no placeholder) and matches the text path.
+func TestSerializeBinary_DroppedConflictFieldNotOrphaned(t *testing.T) {
+	t.Parallel()
+	parser := NewParser(WithLogger(logger))
+
+	// Two fields mapping to the same JSON name; encoding/json's conflict
+	// resolution omits both. Built via reflect.StructOf so the deliberately
+	// duplicated json tag does not trip govet's structtag check. The []byte field
+	// is therefore never marshaled.
+	conflictType := reflect.StructOf([]reflect.StructField{
+		{Name: "A", Type: reflect.TypeOf([]byte(nil)), Tag: `json:"x"`},
+		{Name: "B", Type: reflect.TypeOf(""), Tag: `json:"x"`},
+	})
+	cv := reflect.New(conflictType).Elem()
+	cv.Field(0).SetBytes([]byte{1, 2, 3})
+	cv.Field(1).SetString("hi")
+
+	event := &socketio_v5.Event{
+		Name:     "ev",
+		Payloads: []interface{}{cv.Interface()},
+	}
+	require.True(t, parser.HasBinary(event))
+
+	header, attachments, err := parser.SerializeBinary(&socketio_v5.Message{
+		Type: socketio_v5.PacketEvent, NS: "/", Event: event,
+	})
+	require.NoError(t, err)
+	// json drops both conflicting fields, so no attachment survives and no
+	// placeholder is emitted — not a count=1 header with an orphan frame.
+	require.Len(t, attachments, 0)
+	headerStr := string(header)
+	assert.Contains(t, headerStr, `["ev",{}]`)
+	assert.NotContains(t, headerStr, "_placeholder")
+
+	// The binary header's payload matches what the plain text path produces.
+	text, err := parser.Serialize(&socketio_v5.Message{
+		Type: socketio_v5.PacketEvent, NS: "/", Event: event,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(text), `["ev",{}]`)
 }
 
 // Contrast: a struct without []byte stays on the plain text Serialize path and

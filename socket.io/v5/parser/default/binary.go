@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sort"
 
 	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
 )
@@ -327,23 +328,26 @@ func extractBinary(value interface{}, attachments *[][]byte) (interface{}, error
 	if _, err := randRead(nonce); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrParseBinary, err)
 	}
-	sentinels := make(map[string]int)
-	transformed := transformBinary(reflect.ValueOf(value), attachments, sentinels, nonce, maxBinaryScanDepth)
+	sentinels := make(map[string][]byte)
+	transformed := transformBinary(reflect.ValueOf(value), sentinels, nonce, maxBinaryScanDepth)
 	data, err := json.Marshal(transformed.Interface())
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrParseBinary, err)
 	}
-	return json.RawMessage(splicePlaceholders(data, sentinels)), nil
+	return json.RawMessage(splicePlaceholders(data, sentinels, attachments)), nil
 }
 
 // transformBinary returns a value of the SAME type as rv in which every []byte on
 // a binary-bearing path is replaced by a unique sentinel slice; each sentinel's
-// base64 rendering is recorded in sentinels (keyed to its attachment index) and
-// the original bytes are appended to *attachments. Subtrees with no binary (or
-// whose type owns its encoding, or once the depth bound is hit) are returned
-// unchanged and shared with the original — they are never mutated, because only
-// freshly built containers are ever written to.
-func transformBinary(rv reflect.Value, attachments *[][]byte, sentinels map[string]int, nonce []byte, depth int) reflect.Value {
+// base64 rendering is recorded in sentinels mapped to the original bytes. The
+// attachment list and placeholder numbering are NOT assigned here — they are
+// finalized by splicePlaceholders against the marshaled output, so a sentinel
+// whose field encoding/json ends up dropping (e.g. a json tag/name conflict)
+// never becomes an orphan attachment. Subtrees with no binary (or whose type owns
+// its encoding, or once the depth bound is hit) are returned unchanged and shared
+// with the original — they are never mutated, because only freshly built
+// containers are ever written to.
+func transformBinary(rv reflect.Value, sentinels map[string][]byte, nonce []byte, depth int) reflect.Value {
 	if depth <= 0 || !rv.IsValid() || !reflectHasBinary(rv, depth) {
 		return rv
 	}
@@ -351,31 +355,31 @@ func transformBinary(rv reflect.Value, attachments *[][]byte, sentinels map[stri
 	switch rv.Kind() {
 	case reflect.Pointer:
 		np := reflect.New(rv.Type().Elem())
-		np.Elem().Set(transformBinary(rv.Elem(), attachments, sentinels, nonce, depth-1))
+		np.Elem().Set(transformBinary(rv.Elem(), sentinels, nonce, depth-1))
 		return np
 	case reflect.Interface:
 		out := reflect.New(rv.Type()).Elem()
-		out.Set(transformBinary(rv.Elem(), attachments, sentinels, nonce, depth-1))
+		out.Set(transformBinary(rv.Elem(), sentinels, nonce, depth-1))
 		return out
 	case reflect.Slice:
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
-			return sentinelSlice(rv, attachments, sentinels, nonce)
+			return sentinelSlice(rv, sentinels, nonce)
 		}
 		ns := reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
 		for i := 0; i < rv.Len(); i++ {
-			ns.Index(i).Set(transformBinary(rv.Index(i), attachments, sentinels, nonce, depth-1))
+			ns.Index(i).Set(transformBinary(rv.Index(i), sentinels, nonce, depth-1))
 		}
 		return ns
 	case reflect.Array:
 		na := reflect.New(rv.Type()).Elem()
 		for i := 0; i < rv.Len(); i++ {
-			na.Index(i).Set(transformBinary(rv.Index(i), attachments, sentinels, nonce, depth-1))
+			na.Index(i).Set(transformBinary(rv.Index(i), sentinels, nonce, depth-1))
 		}
 		return na
 	case reflect.Map:
 		nm := reflect.MakeMap(rv.Type())
 		for _, key := range rv.MapKeys() {
-			nm.SetMapIndex(key, transformBinary(rv.MapIndex(key), attachments, sentinels, nonce, depth-1))
+			nm.SetMapIndex(key, transformBinary(rv.MapIndex(key), sentinels, nonce, depth-1))
 		}
 		return nm
 	}
@@ -400,25 +404,26 @@ func transformBinary(rv reflect.Value, attachments *[][]byte, sentinels map[stri
 		if omitempty && isEmptyValue(fv) {
 			continue
 		}
-		ns.Field(i).Set(transformBinary(fv, attachments, sentinels, nonce, depth-1))
+		ns.Field(i).Set(transformBinary(fv, sentinels, nonce, depth-1))
 	}
 	return ns
 }
 
-// sentinelSlice records rv's bytes as the next attachment and returns a same-typed
-// slice holding a unique sentinel. encoding/json renders the sentinel as a base64
-// string, which splicePlaceholders then rewrites into the placeholder object.
-func sentinelSlice(rv reflect.Value, attachments *[][]byte, sentinels map[string]int, nonce []byte) reflect.Value {
+// sentinelSlice records rv's bytes under a unique sentinel and returns a
+// same-typed slice holding that sentinel. encoding/json renders the sentinel as a
+// base64 string, which splicePlaceholders then rewrites into the placeholder
+// object (and only then assigns the attachment its index). The per-serialization
+// index is the current sentinel count, which (with the random nonce) keeps every
+// sentinel — and thus its base64 needle — unique.
+func sentinelSlice(rv reflect.Value, sentinels map[string][]byte, nonce []byte) reflect.Value {
 	orig := rv.Bytes()
 	buf := make([]byte, len(orig))
 	copy(buf, orig)
-	num := len(*attachments)
-	*attachments = append(*attachments, buf)
 
-	// num is a slice length, hence always non-negative; the conversion to the
-	// fixed-width index is safe (no overflow/sign change).
-	sentinel := makeSentinel(nonce, uint64(num))
-	sentinels[base64.StdEncoding.EncodeToString(sentinel)] = num
+	// len(sentinels) is non-negative, so the conversion to the fixed-width index
+	// is safe (no overflow/sign change).
+	sentinel := makeSentinel(nonce, uint64(len(sentinels)))
+	sentinels[base64.StdEncoding.EncodeToString(sentinel)] = buf
 
 	sv := reflect.ValueOf(sentinel)
 	if rv.Type() == byteSliceType {
@@ -450,12 +455,35 @@ func makeSentinel(nonce []byte, num uint64) []byte {
 	return append(s, idx[:]...)
 }
 
-// splicePlaceholders rewrites each sentinel's base64 JSON string ("<b64>") into a
-// {"_placeholder":true,"num":N} object. Each sentinel is unique, so it appears
-// exactly once.
-func splicePlaceholders(data []byte, sentinels map[string]int) []byte {
-	for b64, num := range sentinels {
-		needle := []byte(`"` + b64 + `"`)
+// splicePlaceholders finalizes the binary attachments for one marshaled payload.
+// It rewrites each sentinel's base64 JSON string ("<b64>") into a
+// {"_placeholder":true,"num":N} object, assigning the surviving sentinels
+// contiguous attachment indices (continuing from the message-wide *attachments)
+// in order of their appearance in data, and appends their bytes to *attachments in
+// the same order. A sentinel whose field encoding/json dropped (e.g. a json
+// tag/name conflict) never appears in data, so it is discarded here rather than
+// left as an orphan attachment with no placeholder — keeping the attachment count,
+// the placeholder numbering, and the bytes consistent. Each sentinel is unique, so
+// it appears at most once.
+func splicePlaceholders(data []byte, sentinels map[string][]byte, attachments *[][]byte) []byte {
+	// Collect the sentinels that actually survived into the marshaled output,
+	// ordered by where they appear so numbering is deterministic.
+	type presentSentinel struct {
+		pos int
+		b64 string
+	}
+	present := make([]presentSentinel, 0, len(sentinels))
+	for b64 := range sentinels {
+		if pos := bytes.Index(data, []byte(`"`+b64+`"`)); pos >= 0 {
+			present = append(present, presentSentinel{pos: pos, b64: b64})
+		}
+	}
+	sort.Slice(present, func(i, j int) bool { return present[i].pos < present[j].pos })
+
+	for _, s := range present {
+		num := len(*attachments)
+		*attachments = append(*attachments, sentinels[s.b64])
+		needle := []byte(`"` + s.b64 + `"`)
 		repl := []byte(fmt.Sprintf(`{"_placeholder":true,"num":%d}`, num))
 		data = bytes.Replace(data, needle, repl, 1)
 	}

@@ -166,22 +166,20 @@ func TestExtractBinary_NilPointerLeaf(t *testing.T) {
 
 func TestTransformBinary_DepthBound(t *testing.T) {
 	t.Parallel()
-	var attachments [][]byte
-	sentinels := map[string]int{}
+	sentinels := map[string][]byte{}
 	// depth == 0 returns the value unchanged without recursing.
-	out := transformBinary(reflect.ValueOf("x"), &attachments, sentinels, nil, 0)
+	out := transformBinary(reflect.ValueOf("x"), sentinels, nil, 0)
 	assert.Equal(t, "x", out.Interface())
-	assert.Len(t, attachments, 0)
+	assert.Len(t, sentinels, 0)
 }
 
 func TestTransformBinary_InvalidValue(t *testing.T) {
 	t.Parallel()
-	var attachments [][]byte
-	sentinels := map[string]int{}
+	sentinels := map[string][]byte{}
 	// An invalid reflect.Value (the zero Value) is returned as-is, no panic.
-	out := transformBinary(reflect.Value{}, &attachments, sentinels, nil, 5)
+	out := transformBinary(reflect.Value{}, sentinels, nil, 5)
 	assert.False(t, out.IsValid())
-	assert.Len(t, attachments, 0)
+	assert.Len(t, sentinels, 0)
 }
 
 // blobType is a named []byte alias, exercising sentinelSlice's type-preserving
