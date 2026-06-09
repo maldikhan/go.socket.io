@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	mocks "github.com/maldikhan/go.socket.io/socket.io/v5/client/mocks"
+	socketio_v5_parser_default "github.com/maldikhan/go.socket.io/socket.io/v5/parser/default"
 )
 
 func TestWithConnectTimeout(t *testing.T) {
@@ -47,4 +48,16 @@ func TestWithConnectTimeout(t *testing.T) {
 		assert.Nil(t, client)
 		assert.ErrorContains(t, err, "WithConnectTimeout can't be combined with WithEngineIOClient")
 	})
+}
+
+func TestNewClient_DefaultParserFailure(t *testing.T) {
+	original := defaultParserFactory
+	defaultParserFactory = func(_ ...socketio_v5_parser_default.ParserOption) (*socketio_v5_parser_default.SocketIOV5DefaultParser, error) {
+		return nil, assert.AnError
+	}
+	defer func() { defaultParserFactory = original }()
+
+	client, err := NewClient(WithRawURL("http://localhost"))
+	assert.Nil(t, client)
+	assert.ErrorIs(t, err, assert.AnError)
 }

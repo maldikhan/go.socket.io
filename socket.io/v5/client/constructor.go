@@ -14,6 +14,12 @@ import (
 
 type ClientOption func(*InitClient) error
 
+// defaultParserFactory builds the default socket.io parser. It is a
+// package-level variable so tests can exercise the construction-failure path
+// (NewParser only fails when an option fails, which the options used by
+// NewClient never do).
+var defaultParserFactory = socketio_v5_parser_default.NewParser
+
 type InitClient struct {
 	url            *url.URL
 	defaultNsName  *string
@@ -46,7 +52,7 @@ func NewClient(options ...ClientOption) (*Client, error) {
 	}
 
 	if client.parser == nil {
-		parser, err := socketio_v5_parser_default.NewParser(
+		parser, err := defaultParserFactory(
 			socketio_v5_parser_default.WithLogger(client.logger),
 		)
 		if err != nil {
