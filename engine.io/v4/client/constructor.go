@@ -155,6 +155,22 @@ func WithReconnectWait(wait time.Duration) EngineClientOption {
 	}
 }
 
+// WithConnectTimeout limits the duration of the connection phase (transport
+// dial, handshake request and the OPEN packet, including an eventual transport
+// upgrade) without limiting the session lifetime. With this option set,
+// Connect() blocks until the handshake completes and returns
+// context.DeadlineExceeded when it does not finish in time; the context passed
+// to Connect() still controls the lifetime of the established session.
+func WithConnectTimeout(timeout time.Duration) EngineClientOption {
+	return func(c *Client) error {
+		if timeout <= 0 {
+			return fmt.Errorf("connect timeout must be positive, got %s", timeout)
+		}
+		c.connectTimeout = timeout
+		return nil
+	}
+}
+
 // WithDebugPayload enables logging of raw packet payloads at debug level.
 // It is disabled by default so production logs do not leak message contents.
 func WithDebugPayload(enabled bool) EngineClientOption {
