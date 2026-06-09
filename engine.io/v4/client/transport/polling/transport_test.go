@@ -680,7 +680,7 @@ func TestStop(t *testing.T) {
 		client := &Transport{
 			stopPooling: make(chan struct{}, 1),
 		}
-		atomic.StoreUint32(&client.stopped, 1)
+		client.stopped.Store(true)
 
 		// Should return immediately without sending to stopPooling
 		err := client.Stop()
@@ -1374,8 +1374,8 @@ func TestRun_stopped_flag_reset(t *testing.T) {
 		}
 
 		// Verify stopped flag is set
-		stoppedBefore := atomic.LoadUint32(&client.stopped)
-		assert.Equal(t, uint32(1), stoppedBefore, "stopped flag should be 1 after Stop()")
+		stoppedBefore := client.stopped.Load()
+		assert.True(t, stoppedBefore, "stopped flag should be true after Stop()")
 
 		// Reset channels for second run
 		onCloseChan = make(chan error, 1)
@@ -1386,8 +1386,8 @@ func TestRun_stopped_flag_reset(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Verify stopped flag is reset
-		stoppedAfter := atomic.LoadUint32(&client.stopped)
-		assert.Equal(t, uint32(0), stoppedAfter, "stopped flag should be 0 after second Run()")
+		stoppedAfter := client.stopped.Load()
+		assert.False(t, stoppedAfter, "stopped flag should be false after second Run()")
 
 		time.Sleep(10 * time.Millisecond)
 
