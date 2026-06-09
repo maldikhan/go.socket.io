@@ -7,11 +7,13 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	mock_socketio_v5_parser_default "github.com/maldikhan/go.socket.io/socket.io/v5/parser/default/mocks"
+	"github.com/maldikhan/go.socket.io/utils"
 )
 
 func TestNewParser(t *testing.T) {
 	t.Run("Default configuration", func(t *testing.T) {
-		parser := NewParser()
+		parser, err := NewParser()
+		assert.NoError(t, err)
 		assert.NotNil(t, parser)
 		assert.IsType(t, &SocketIOV5DefaultParser{}, parser)
 	})
@@ -21,10 +23,10 @@ func TestNewParser(t *testing.T) {
 		defer ctrl.Finish()
 
 		mockLogger := mock_socketio_v5_parser_default.NewMockLogger(ctrl)
-		parser := NewParser(WithLogger(mockLogger))
+		parser, err := NewParser(WithLogger(mockLogger))
+		assert.NoError(t, err)
 		assert.NotNil(t, parser)
-		// Проверяем, что логгер был установлен, но это потребует изменения в структуре ParserConfig
-		// assert.Equal(t, mockLogger, parser.logger)
+		assert.Equal(t, mockLogger, parser.logger)
 	})
 
 	t.Run("With custom payload parser", func(t *testing.T) {
@@ -33,10 +35,10 @@ func TestNewParser(t *testing.T) {
 
 		mockPayloadParser := mock_socketio_v5_parser_default.NewMockPayloadParser(ctrl)
 
-		parser := NewParser(WithPayloadParser(mockPayloadParser))
+		parser, err := NewParser(WithPayloadParser(mockPayloadParser))
+		assert.NoError(t, err)
 		assert.NotNil(t, parser)
-		// Проверяем, что payload parser был установлен, но это потребует изменения в структуре ParserConfig
-		// assert.Equal(t, mockPayloadParser, parser.payloadParser)
+		assert.Equal(t, mockPayloadParser, parser.payloadParser)
 	})
 
 	t.Run("With multiple options", func(t *testing.T) {
@@ -46,14 +48,14 @@ func TestNewParser(t *testing.T) {
 		mockLogger := mock_socketio_v5_parser_default.NewMockLogger(ctrl)
 		mockPayloadParser := mock_socketio_v5_parser_default.NewMockPayloadParser(ctrl)
 
-		parser := NewParser(
+		parser, err := NewParser(
 			WithLogger(mockLogger),
 			WithPayloadParser(mockPayloadParser),
 		)
+		assert.NoError(t, err)
 		assert.NotNil(t, parser)
-		// Проверяем, что оба опции были применены, но это потребует изменения в структуре ParserConfig
-		// assert.Equal(t, mockLogger, parser.logger)
-		// assert.Equal(t, mockPayloadParser, parser.payloadParser)
+		assert.Equal(t, mockLogger, parser.logger)
+		assert.Equal(t, mockPayloadParser, parser.payloadParser)
 	})
 }
 
@@ -87,20 +89,18 @@ func TestWithPayloadParser(t *testing.T) {
 }
 
 func TestParserConfig_DefaultLogger(t *testing.T) {
-	parser := NewParser()
+	parser, err := NewParser()
+	assert.NoError(t, err)
 	assert.NotNil(t, parser)
-
-	// Проверяем, что используется DefaultLogger, когда не указан пользовательский логгер
-	// Это потребует изменения в структуре ParserConfig для доступа к полю logger
-	// assert.IsType(t, &utils.DefaultLogger{}, parser.logger)
+	assert.IsType(t, &utils.DefaultLogger{}, parser.logger)
 }
 
-func TestParserConfig_PanicOnInvalidOption(t *testing.T) {
+func TestParserConfig_ErrorOnInvalidOption(t *testing.T) {
 	invalidOption := func(p *SocketIOV5DefaultParser) error {
 		return assert.AnError
 	}
 
-	assert.Panics(t, func() {
-		NewParser(invalidOption)
-	})
+	parser, err := NewParser(invalidOption)
+	assert.Nil(t, parser)
+	assert.ErrorIs(t, err, assert.AnError)
 }

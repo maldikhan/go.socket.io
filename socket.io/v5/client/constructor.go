@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"time"
 
 	engineio_v4_client "github.com/maldikhan/go.socket.io/engine.io/v4/client"
 	socketio_v5_parser_default "github.com/maldikhan/go.socket.io/socket.io/v5/parser/default"
@@ -14,8 +15,9 @@ import (
 type ClientOption func(*InitClient) error
 
 type InitClient struct {
-	url           *url.URL
-	defaultNsName *string
+	url            *url.URL
+	defaultNsName  *string
+	connectTimeout time.Duration
 	*Client
 }
 
@@ -44,9 +46,13 @@ func NewClient(options ...ClientOption) (*Client, error) {
 	}
 
 	if client.parser == nil {
-		client.parser = socketio_v5_parser_default.NewParser(
+		parser, err := socketio_v5_parser_default.NewParser(
 			socketio_v5_parser_default.WithLogger(client.logger),
 		)
+		if err != nil {
+			return nil, err
+		}
+		client.parser = parser
 	}
 
 	if client.timer == nil {
@@ -58,15 +64,21 @@ func NewClient(options ...ClientOption) (*Client, error) {
 	}
 
 	if client.engineio == nil {
-		engineioClient, err := engineio_v4_client.NewClient(
+		engineOptions := []engineio_v4_client.EngineClientOption{
 			engineio_v4_client.WithURL(client.url),
 			engineio_v4_client.WithLogger(client.logger),
 			engineio_v4_client.WithDebugPayload(!client.redactPayload),
-		)
+		}
+		if client.connectTimeout > 0 {
+			engineOptions = append(engineOptions, engineio_v4_client.WithConnectTimeout(client.connectTimeout))
+		}
+		engineioClient, err := engineio_v4_client.NewClient(engineOptions...)
 		if err != nil {
 			return nil, err
 		}
 		client.engineio = engineioClient
+	} else if client.connectTimeout > 0 {
+		return nil, errors.New("WithConnectTimeout can't be combined with WithEngineIOClient: configure the timeout on the engine.io client instead")
 	}
 
 	defaultNsName := "/"
@@ -136,6 +148,25 @@ func WithTimer(timer Timer) ClientOption {
 func WithParser(parser Parser) ClientOption {
 	return func(c *InitClient) error {
 		c.parser = parser
+		return nil
+	}
+}
+
+// WithConnectTimeout limits the duration of the connection phase (transport
+// dial and engine.io handshake) without limiting the session lifetime: with
+// this option set, Connect() fails fast with context.DeadlineExceeded when the
+// server is unreachable, while the context passed to Connect() still controls
+// how long an established session lives.
+//
+// The option configures the engine.io client built internally by NewClient,
+// so it can't be combined with WithEngineIOClient — pass
+// engineio_v4_client.WithConnectTimeout to your own engine.io client instead.
+func WithConnectTimeout(timeout time.Duration) ClientOption {
+	return func(c *InitClient) error {
+		if timeout <= 0 {
+			return fmt.Errorf("connect timeout must be positive, got %s", timeout)
+		}
+		c.connectTimeout = timeout
 		return nil
 	}
 }
