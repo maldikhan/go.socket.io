@@ -94,7 +94,7 @@ More usage examples can be found in the [examples](https://github.com/maldikhan/
 
 ## Requirements
 
-- Go 1.18 or later
+- Go 1.21 or later
 
 ## Installation
 
@@ -298,6 +298,7 @@ err := client.Close()
 - `WithLogger(Logger)`: Use a custom logger
 - `WithTimer(Timer)`: Use a custom timer
 - `WithParser(Parser)`: Use a custom parser (see [jsoniter fast default event parser implementation](https://github.com/maldikhan/go.socket.io-parser.jsoniter))
+- `WithConnectTimeout(time.Duration)`: Fail fast when the server is unreachable, without limiting the session lifetime (see [Connect timeout](#connect-timeout))
 
 ### Engine.IO Client Options
 
@@ -309,6 +310,90 @@ err := client.Close()
 - `WithParser(Parser)`: Use a custom parser
 - `WithReconnectAttempts(int)`: Set the number of reconnect attempts
 - `WithReconnectWait(time.Duration)`: Set the wait time between reconnect attempts
+- `WithConnectTimeout(time.Duration)`: Limit the duration of the connection phase only (see [Connect timeout](#connect-timeout))
+
+### Connect timeout
+
+The context passed to `client.Connect(ctx)` controls the lifetime of the whole
+session: cancelling it stops the client. This means a
+`context.WithTimeout(ctx, 5*time.Second)` would kill the client 5 seconds after
+connecting — and a plain `context.Background()` gives no way to fail fast when
+the server is unreachable.
+
+Use `WithConnectTimeout` to bound only the connection phase (transport dial,
+engine.io handshake and transport upgrade). With this option set, `Connect`
+blocks until the handshake completes and returns `context.DeadlineExceeded`
+when it does not finish in time, while a successfully established session keeps
+running for as long as the `Connect` context allows:
+
+```go
+client, err := socketio.NewClient(
+    socketio.WithRawURL("http://localhost:3000"),
+    socketio.WithConnectTimeout(3*time.Second),
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Fails after ~3s if the server is unreachable; the session itself is
+// unaffected by the timeout once connected.
+if err := client.Connect(context.Background()); err != nil {
+    log.Fatal(err)
+}
+```
+
+The same option is available on the engine.io client
+(`engineio.WithConnectTimeout`) when you build it yourself via
+`WithEngineIOClient`.
+
+### Alternative WebSocket backend
+
+By default the WebSocket transport uses a zero-dependency backend built on
+`golang.org/x/net/websocket`. That package is frozen and lacks
+permessage-deflate compression, a proper RFC 6455 close handshake and
+configurable read limits.
+
+If you need those, opt in to the backend built on
+[github.com/coder/websocket](https://github.com/coder/websocket) (the actively
+maintained continuation of `nhooyr.io/websocket`):
+
+```go
+import (
+    engineio "github.com/maldikhan/go.socket.io/engine.io/v4/client"
+    engineio_ws "github.com/maldikhan/go.socket.io/engine.io/v4/client/transport/websocket"
+    ws_coder "github.com/maldikhan/go.socket.io/websocket/coder"
+)
+
+wsConn, err := ws_coder.New(
+    // Optional: enable permessage-deflate compression.
+    // ws_coder.WithCompression(websocket.CompressionContextTakeover),
+    // Optional: cap inbound message size (default 4MB, -1 to disable).
+    // ws_coder.WithReadLimit(1024 * 1024),
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+wsTransport, err := engineio_ws.NewTransport(engineio_ws.WithWebSocket(wsConn))
+if err != nil {
+    log.Fatal(err)
+}
+
+engineioClient, err := engineio.NewClient(
+    engineio.WithRawURL("http://localhost:3000/socket.io/"),
+    engineio.WithTransport(wsTransport),
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+client, err := socketio.NewClient(
+    socketio.WithEngineIOClient(engineioClient),
+)
+```
+
+The default backend stays dependency-free; the coder backend is only linked
+into your binary when you import `websocket/coder`.
 
 ## Concurrency Model
 
