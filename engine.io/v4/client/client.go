@@ -126,6 +126,20 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	select {
 	case <-wh:
+		// Handshake complete. If a transport upgrade was initiated, also wait
+		// for the probe/pong exchange: handleHandshake publishes waitUpgrade
+		// before closing waitHandshake, and the gate is only closed once the
+		// upgrade finishes (or fails). Without this, Connect() could return
+		// success while Send() still blocks on the unfinished upgrade.
+		c.transportMu.RLock()
+		wu := c.waitUpgrade
+		c.transportMu.RUnlock()
+		if wu != nil {
+			select {
+			case <-wu:
+			case <-connCtx.Done():
+			}
+		}
 		timer.Stop()
 		if connCtx.Err() == nil {
 			return nil
