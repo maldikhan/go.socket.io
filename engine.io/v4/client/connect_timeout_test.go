@@ -322,3 +322,86 @@ func TestClient_Connect_Timeout_Upgrade(t *testing.T) {
 		assert.Less(t, time.Since(start), 5*time.Second, "Connect must fail fast on a stuck upgrade")
 	})
 }
+
+func TestClient_Connect_Timeout_UnblocksSend(t *testing.T) {
+	t.Parallel()
+
+	t.Run("send after a timed-out connect fails fast", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		client, mockTransport, _ := newTimeoutTestClient(t, ctrl, 30*time.Millisecond)
+
+		mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+		mockTransport.EXPECT().RequestHandshake().Return(nil)
+		mockTransport.EXPECT().Stop().DoAndReturn(func() error {
+			client.transportClosed <- nil
+			return nil
+		})
+
+		err := client.Connect(context.Background())
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+
+		// The teardown closed the connection gates, so Send() must observe the
+		// nil transport instead of blocking on the never-completed handshake.
+		sendDone := make(chan error, 1)
+		go func() {
+			sendDone <- client.Send([]byte("hello"))
+		}()
+
+		select {
+		case err := <-sendDone:
+			assert.ErrorContains(t, err, "client is closed")
+		case <-time.After(time.Second):
+			t.Fatal("Send blocked after a failed connect")
+		}
+	})
+
+	t.Run("timeout unblocks a Send pending on the handshake gate", func(t *testing.T) {
+		t.Parallel()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		client, mockTransport, _ := newTimeoutTestClient(t, ctrl, 50*time.Millisecond)
+
+		mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+		mockTransport.EXPECT().RequestHandshake().Return(nil)
+		mockTransport.EXPECT().Stop().DoAndReturn(func() error {
+			client.transportClosed <- nil
+			return nil
+		})
+
+		connectDone := make(chan error, 1)
+		go func() {
+			connectDone <- client.Connect(context.Background())
+		}()
+
+		// Wait until the connect cycle published the handshake gate, then park
+		// a Send() on it.
+		require.Eventually(t, func() bool {
+			client.transportMu.RLock()
+			defer client.transportMu.RUnlock()
+			return client.waitHandshake != nil
+		}, time.Second, time.Millisecond)
+
+		sendDone := make(chan error, 1)
+		go func() {
+			sendDone <- client.Send([]byte("hello"))
+		}()
+
+		select {
+		case err := <-connectDone:
+			assert.ErrorIs(t, err, context.DeadlineExceeded)
+		case <-time.After(time.Second):
+			t.Fatal("Connect did not time out")
+		}
+
+		select {
+		case err := <-sendDone:
+			assert.ErrorContains(t, err, "client is closed")
+		case <-time.After(time.Second):
+			t.Fatal("Send was not unblocked by the connect timeout teardown")
+		}
+	})
+}

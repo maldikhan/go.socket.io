@@ -486,6 +486,20 @@ func (c *Client) Close() error {
 	c.transport = nil
 	connectCancel := c.connectCancel
 	c.connectCancel = nil
+	// Release the connection gates so that a Send() waiting for a handshake
+	// or upgrade that will never complete (e.g. after a connect timeout
+	// teardown) wakes up, observes the nil transport and fails fast with
+	// "client is closed" instead of blocking forever.
+	c.hadHandshake.Do(func() {
+		if c.waitHandshake != nil {
+			close(c.waitHandshake)
+		}
+	})
+	c.hadUpgrade.Do(func() {
+		if c.waitUpgrade != nil {
+			close(c.waitUpgrade)
+		}
+	})
 	c.transportMu.Unlock()
 
 	// Release the connection context created by Connect() (when a connect
