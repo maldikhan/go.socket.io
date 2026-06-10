@@ -75,6 +75,7 @@ func (n *namespace) Emit(event interface{}, args ...interface{}) error {
 
 	return n.client.sendPacketWithAckTimeout(
 		&socketio_v5.Message{
+			NS:    n.name,
 			Type:  socketio_v5.PacketEvent,
 			Event: emitEvent,
 		},
