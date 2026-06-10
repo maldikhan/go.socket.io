@@ -434,14 +434,27 @@ func TestClient_Connect_Timeout_CloseAborts(t *testing.T) {
 	mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 	// The handshake request succeeds but no OPEN packet ever arrives, so
 	// Connect parks waiting on the handshake gate until Close() aborts it.
-	mockTransport.EXPECT().RequestHandshake().Return(nil)
-	mockTransport.EXPECT().Stop().Do(func() {
-		client.transportClosed <- nil
+	// handshakeRequested orders the concurrent Close() strictly after the
+	// connection setup finished, so the per-cycle channels Stop() writes to
+	// are guaranteed to exist regardless of scheduler load.
+	handshakeRequested := make(chan struct{})
+	mockTransport.EXPECT().RequestHandshake().DoAndReturn(func() error {
+		close(handshakeRequested)
+		return nil
+	})
+	mockTransport.EXPECT().Stop().DoAndReturn(func() error {
+		select {
+		case client.transportClosed <- nil:
+		default:
+		}
+		return nil
 	})
 
 	go func() {
-		// Give Connect a moment to reach the gate wait, then close the client.
-		time.Sleep(50 * time.Millisecond)
+		<-handshakeRequested
+		// Give Connect a moment to park on the handshake gate; even if Close
+		// wins this race, the gate release below still aborts Connect.
+		time.Sleep(20 * time.Millisecond)
 		_ = client.Close()
 	}()
 
