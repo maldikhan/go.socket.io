@@ -95,13 +95,13 @@ func (p *EngineIOV4Parser) Serialize(msg *engineio_v4.Message) ([]byte, error) {
 	// A binary attachment is serialized as 'b' followed by the base64 encoding
 	// of the raw bytes — the engine.io v4 text-payload representation used over
 	// HTTP long-polling.
+	//
+	// Both packets are built with append from a 1-byte literal rather than
+	// make(..., len+1): append grows the buffer itself, so there is no explicit
+	// size computation that could overflow on untrusted input lengths.
 	if msg.Binary {
 		encoded := base64.StdEncoding.EncodeToString(msg.Data)
-		packet := make([]byte, 1, len(encoded)+1)
-		packet[0] = binaryPrefix
-		return append(packet, encoded...), nil
+		return append([]byte{binaryPrefix}, encoded...), nil
 	}
-	packet := make([]byte, 1, len(msg.Data)+1)
-	packet[0] = byte(msg.Type) + 0x30
-	return append(packet, msg.Data...), nil
+	return append([]byte{byte(msg.Type) + 0x30}, msg.Data...), nil
 }
