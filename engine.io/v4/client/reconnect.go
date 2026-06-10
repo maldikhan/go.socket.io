@@ -227,14 +227,19 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 	// transport that dies before the handshake is instead caught by the timer.
 	select {
 	case <-wh:
-		return true
+		// Close() also releases the handshake gate (so parked Send()s fail
+		// fast); a gate closed by that teardown — not by a real handshake —
+		// must not be reported as a successful reconnect.
+		return !c.stopRequested()
 	case <-ctxDone:
 		// Context cancellation winds the transports and the message loop down
-		// on its own; nothing to tear down here.
+		// on its own, but nothing ever closes this cycle's handshake gate;
+		// release it so Send() callers parked there fail fast.
+		c.releaseGates()
 		return false
 	case <-closeCh:
 		// Close() owns the teardown (attempt finished, supervisor not started,
-		// so it drains transportClosed itself).
+		// so it drains transportClosed itself) and releases the gates.
 		return false
 	case <-timer.C:
 	}
@@ -248,7 +253,9 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 	select {
 	case <-wh:
 		c.transportMu.Unlock()
-		return true
+		// Same guard as above: a gate released by Close()'s teardown is not a
+		// completed handshake.
+		return !c.stopRequested()
 	default:
 	}
 	atomic.StoreUint32(&c.cycleAbandoned, 1)
@@ -272,6 +279,12 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 		}
 	}
 	c.stopMessageLoop()
+	// Release this cycle's handshake gate: nothing will ever close it (the
+	// handshake never completed and the next attempt arms a fresh channel), so
+	// a Send() parked on it — including emitters released by a final
+	// "reconnect_failed" — would otherwise block forever instead of failing
+	// fast against the stopped transport.
+	c.releaseGates()
 	return false
 }
 

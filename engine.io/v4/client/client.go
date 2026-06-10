@@ -265,6 +265,11 @@ func (c *Client) startConnection(ctx context.Context) error {
 		}
 		c.messagesStop = nil
 		c.transportMu.Unlock()
+		// The handshake gate armed above will never be closed by a handshake;
+		// release it so Send() callers parked on it fail fast against the
+		// stopped transport instead of waiting on a channel no future cycle
+		// closes (every cycle arms a fresh one).
+		c.releaseGates()
 		close(c.supervisorDone)
 		atomic.StoreUint32(&c.attemptInFlight, 0)
 		return err
@@ -286,6 +291,10 @@ func (c *Client) startConnection(ctx context.Context) error {
 		// Stop the message loop via its stop signal; the messages channel is
 		// left for Close() to close exactly once.
 		c.stopMessageLoop()
+		// The concurrent Close() released the gates of the PREVIOUS cycle; the
+		// fresh gate armed above (after Close's release) must be released by
+		// this teardown, or Send() callers parked on it would never wake.
+		c.releaseGates()
 		close(c.supervisorDone)
 		return errClientClosed
 	}
@@ -627,6 +636,28 @@ func (c *Client) On(event string, handler func([]byte)) {
 	}
 }
 
+// releaseGates closes the current cycle's handshake/upgrade gates (each via
+// its sync.Once guard) so Send() callers parked on them wake up, observe the
+// dead/nil transport and fail fast. Every (re)connect cycle arms a FRESH
+// waitHandshake channel, so a gate left open by an abandoned cycle would park
+// its waiters forever — no future cycle ever closes the old channel object.
+// Called when a cycle is abandoned (handshake never completed), when its
+// handshake request fails after the gate was armed, and by Close().
+func (c *Client) releaseGates() {
+	c.transportMu.Lock()
+	defer c.transportMu.Unlock()
+	c.hadHandshake.Do(func() {
+		if c.waitHandshake != nil {
+			close(c.waitHandshake)
+		}
+	})
+	c.hadUpgrade.Do(func() {
+		if c.waitUpgrade != nil {
+			close(c.waitUpgrade)
+		}
+	})
+}
+
 func (c *Client) Close() error {
 	// Mark the client as intentionally closing BEFORE stopping the transport so
 	// the reconnect supervisor treats the resulting drop as a graceful shutdown
@@ -663,6 +694,12 @@ func (c *Client) Close() error {
 		atomic.LoadUint32(&c.attemptInFlight) == 1
 	supervisorDone := c.supervisorDone
 	c.transportMu.Unlock()
+
+	// Release the handshake/upgrade gates AFTER the transport is nil'ed above:
+	// a Send() parked on a gate wakes, re-reads the transport, sees nil and
+	// fails fast with "client is closed" instead of blocking forever on a gate
+	// that no future cycle will close.
+	c.releaseGates()
 
 	// Stop the ping ticker to prevent goroutine leak
 	if c.pingInterval != nil {

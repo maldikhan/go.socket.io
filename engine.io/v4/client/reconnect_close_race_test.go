@@ -515,3 +515,84 @@ func TestAwaitConnectionEstablishedPhotoFinish(t *testing.T) {
 		t.Fatal("awaitConnectionEstablished did not return")
 	}
 }
+
+// TestAbandonedAttemptReleasesHandshakeGate reproduces the review finding: a
+// reconnect attempt that is abandoned because its handshake never completed
+// must close the cycle's waitHandshake gate. Every cycle arms a FRESH channel,
+// so a Send() parked on an abandoned cycle's gate would otherwise block
+// forever — even after a later successful reconnect or a final
+// "reconnect_failed" — instead of failing fast against the dead transport.
+func TestAbandonedAttemptReleasesHandshakeGate(t *testing.T) {
+	t.Parallel()
+	client, transport, parser, _ := newReconnectClient(t)
+	client.transportMu.Lock()
+	client.waitHandshake = make(chan struct{}, 1)
+	client.transportClosed = make(chan error, 1)
+	client.transportMu.Unlock()
+
+	transport.EXPECT().Stop().DoAndReturn(func() error {
+		client.transportClosed <- nil
+		return nil
+	})
+	// The woken Send() proceeds to the stopped transport and must surface its
+	// error instead of blocking on the gate.
+	sendErr := errors.New("transport stopped")
+	parser.EXPECT().Serialize(gomock.Any()).Return([]byte("4x"), nil).AnyTimes()
+	transport.EXPECT().SendMessage(gomock.Any()).Return(sendErr).AnyTimes()
+
+	// Park a Send() on the handshake gate before the attempt is abandoned.
+	sendDone := make(chan error, 1)
+	go func() { sendDone <- client.Send([]byte("x")) }()
+
+	assert.False(t, client.awaitConnectionEstablished(10*time.Millisecond))
+
+	select {
+	case err := <-sendDone:
+		assert.ErrorIs(t, err, sendErr, "the parked Send must fail against the stopped transport")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send stayed parked on the abandoned cycle's handshake gate")
+	}
+
+	// The gate itself must be observably closed for future Send() snapshots.
+	client.transportMu.RLock()
+	wh := client.waitHandshake
+	client.transportMu.RUnlock()
+	select {
+	case <-wh:
+	default:
+		t.Fatal("waitHandshake left open after the attempt was abandoned")
+	}
+}
+
+// TestCloseReleasesGates verifies that Close() releases both the handshake and
+// the upgrade gate, so a Send() parked on either wakes, observes the nil
+// transport and fails fast with "client is closed".
+func TestCloseReleasesGates(t *testing.T) {
+	t.Parallel()
+	client, transport, _, _ := newReconnectClient(t)
+	client.transportMu.Lock()
+	client.waitHandshake = make(chan struct{}, 1)
+	client.waitUpgrade = make(chan struct{}, 1)
+	client.transportClosed = make(chan error, 1)
+	client.transportMu.Unlock()
+
+	transport.EXPECT().Stop().DoAndReturn(func() error {
+		client.transportClosed <- nil
+		return nil
+	})
+
+	// Park one Send() before Close(); it waits on both gates.
+	sendDone := make(chan error, 1)
+	go func() { sendDone <- client.Send([]byte("x")) }()
+	// Give the Send a moment to snapshot the gates and park.
+	time.Sleep(20 * time.Millisecond)
+
+	require.NoError(t, client.Close())
+
+	select {
+	case err := <-sendDone:
+		assert.ErrorContains(t, err, "client is closed")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send stayed parked on the gates after Close")
+	}
+}
