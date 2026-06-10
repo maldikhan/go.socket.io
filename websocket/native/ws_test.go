@@ -40,22 +40,24 @@ func TestWebSocketConnection_Dial(t *testing.T) {
 	t.Run("Connection error", func(t *testing.T) {
 		t.Parallel()
 		ws := &WebSocketConnection{}
-		err = ws.Dial(ctx, &url.URL{
+		// Use a local error: parallel subtests must not write the shared
+		// variable from the parent scope (data race).
+		dialErr := ws.Dial(ctx, &url.URL{
 			Path:   "invalid-url",
 			Scheme: "ws",
 		}, origin)
-		assert.Error(t, err, "Dial should return an error for invalid URL")
+		assert.Error(t, dialErr, "Dial should return an error for invalid URL")
 		assert.Nil(t, ws.conn, "Connection should not be established")
 	})
 
 	t.Run("Config error", func(t *testing.T) {
 		t.Parallel()
 		ws := &WebSocketConnection{}
-		err = ws.Dial(ctx, &url.URL{
+		dialErr := ws.Dial(ctx, &url.URL{
 			Path:   "invalid-url",
 			Scheme: ";;;",
 		}, origin)
-		assert.Error(t, err, "Dial should return an error for invalid URL")
+		assert.Error(t, dialErr, "Dial should return an error for invalid URL")
 		assert.Nil(t, ws.conn, "Connection should not be established")
 	})
 }
@@ -256,18 +258,17 @@ func createTestServer(t *testing.T, receivedChan chan<- string) *httptest.Server
 			var msg string
 			err := websocket.Message.Receive(ws, &msg)
 			if err != nil {
-				// Игнорируем ошибку EOF, так как она ожидаема при закрытии соединения
-				if err.Error() != "EOF" {
-					t.Logf("Server received an error: %v", err)
-				}
+				// Receive errors (EOF, connection reset) are expected when the
+				// client side of a finished test tears the connection down. The
+				// handler goroutine may outlive the test, so it must not call
+				// t.Logf/t.Errorf here — logging after the test completes panics.
 				return
 			}
 			if receivedChan != nil {
 				receivedChan <- msg
 			}
-			// Echo the message back
+			// Echo the message back. Send errors are likewise teardown noise.
 			if err := websocket.Message.Send(ws, msg); err != nil {
-				t.Errorf("Server failed to send message: %v", err)
 				return
 			}
 		}
