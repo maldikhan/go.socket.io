@@ -25,13 +25,23 @@ func (p *SocketIOV5DefaultParser) WrapCallback(callback interface{}) func(in []i
 	}
 
 	return func(in []interface{}) {
-		if len(in) < callbackType.NumIn() {
+		// A variadic callback (e.g. func(args ...interface{})) only requires
+		// its fixed parameters: when exactly those are supplied, the variadic
+		// slot is omitted and reflect's Call invokes the function with an
+		// empty variadic list. Without this, a handler registered for a
+		// reserved lifecycle event ("reconnect", "reconnecting",
+		// "reconnect_failed") — which is dispatched with no payload — would be
+		// silently rejected by the arity check below.
+		numIn := callbackType.NumIn()
+		if callbackType.IsVariadic() && len(in) == numIn-1 {
+			numIn--
+		} else if len(in) < numIn {
 			p.logger.Errorf("Error: expected %d arguments, got %d\n", callbackType.NumIn(), len(in))
 			return
 		}
 
-		args := make([]reflect.Value, callbackType.NumIn())
-		for i := 0; i < callbackType.NumIn(); i++ {
+		args := make([]reflect.Value, numIn)
+		for i := 0; i < numIn; i++ {
 			argType := callbackType.In(i)
 			argValue := reflect.New(argType).Interface()
 			data, ok := in[i].(json.RawMessage)

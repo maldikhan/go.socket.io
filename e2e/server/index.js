@@ -28,6 +28,14 @@ function wire(socket, ns) {
     socket.emit('welcome', 'hello ' + name);
   });
 
+
+  // "kick" abruptly closes the underlying engine.io connection (as a network
+  // drop / server restart would), letting clients exercise their automatic
+  // reconnection: the socket.io session itself is NOT gracefully disconnected.
+  socket.on('kick', () => {
+    socket.conn.close(true);
+  });
+
   // eslint-disable-next-line no-console
   console.log('client connected on namespace ' + ns + ': ' + socket.id);
 }

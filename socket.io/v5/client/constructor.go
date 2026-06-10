@@ -78,6 +78,36 @@ func NewClient(options ...ClientOption) (*Client, error) {
 	client.engineio.On("connect", client.connectSocketIO)
 	client.engineio.On("message", client.onMessage)
 
+	// Reconnect wiring. A successful engine.io reconnect performs a fresh
+	// handshake, which fires the engine-level "connect" event registered above
+	// and therefore already re-sends the socket.io CONNECT packet exactly once.
+	// The "reconnect" handler must NOT send CONNECT again, otherwise two CONNECT
+	// packets would be emitted for the same namespace per reconnect (duplicate
+	// server-side connect handling / protocol errors). It only surfaces the
+	// reconnect lifecycle events to socket.io-level handlers so users can react
+	// with client.On("reconnect"/"reconnecting"/"reconnect_failed", ...).
+	client.engineio.On("reconnect", func(_ []byte) {
+		client.emitReserved("reconnect")
+	})
+	client.engineio.On("reconnecting", func(_ []byte) {
+		// Re-arm the namespace CONNECT gate before any reconnect attempt is
+		// made: the engine-level "connect" hook above runs asynchronously after
+		// a successful attempt and re-sends the socket.io CONNECT, and emits
+		// (including ones fired from a "reconnect" handler) must block until
+		// the server acknowledges it (handleConnect re-opens the gate).
+		// "reconnecting" fires before a new connection can exist, so the reset
+		// cannot race with that ack.
+		client.defaultNs.resetConnectionGate()
+		client.emitReserved("reconnecting")
+	})
+	client.engineio.On("reconnect_failed", func(_ []byte) {
+		// All attempts failed and the engine client closes: release pending
+		// emitters so they fail fast at the transport instead of hanging on a
+		// gate no CONNECT ack will ever close.
+		client.defaultNs.openConnectionGate()
+		client.emitReserved("reconnect_failed")
+	})
+
 	return client.Client, nil
 }
 

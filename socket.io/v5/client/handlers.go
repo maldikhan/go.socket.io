@@ -24,6 +24,33 @@ func (n *namespace) OnAny(handler func(string, []interface{})) {
 	n.mu.Unlock()
 }
 
+// emitReserved dispatches a reserved client-lifecycle event (e.g. "reconnect",
+// "reconnecting", "reconnect_failed") to handlers registered on the default
+// namespace. These events originate from the engine.io layer rather than from a
+// server packet, so they carry no payload. Handlers run on safeGo goroutines,
+// matching the dispatch style of the packet-driven handlers below.
+func (c *Client) emitReserved(event string) {
+	ns := c.defaultNs
+	if ns == nil {
+		return
+	}
+
+	ns.mu.RLock()
+	handlers := ns.handlers[event]
+	anyHandlers := ns.anyHandlers
+	ns.mu.RUnlock()
+
+	for _, handler := range anyHandlers {
+		h := handler
+		c.safeGo(func() { h(event, nil) })
+	}
+
+	for _, handler := range handlers {
+		h := handler
+		c.safeGo(func() { h(nil) })
+	}
+}
+
 func (c *Client) onMessage(data []byte) {
 	c.logger.Debugf("socketio receive %s", c.payload(data))
 
@@ -120,11 +147,7 @@ func (c *Client) handleDisconnect(ns *namespace, payload interface{}) {
 
 func (c *Client) handleConnect(ns *namespace, payload interface{}) {
 	c.logger.Infof("Connected to namespace: %s", ns.name)
-	ns.hadConnected.Do(func() {
-		if ns.waitConnected != nil {
-			close(ns.waitConnected)
-		}
-	})
+	ns.openConnectionGate()
 
 	ns.mu.RLock()
 	handlers, ok := ns.handlers["connect"]

@@ -308,17 +308,21 @@ func TestPollingLoop(t *testing.T) {
 		defer cancel()
 
 		errExpected := errors.New("expected error")
-		pingCalled := make(chan struct{})
+		// errLogged is closed once the loop has logged the poll error. Triggering
+		// Stop() off this (rather than off the Do call) makes the test
+		// deterministic: Stop() runs only after pollingLoop has already passed its
+		// stopped-check and logged, so the "poll error" Errorf is always observed.
+		// Stopping earlier raced the loop's stopped-check and could make it exit
+		// before logging, flaking the MinTimes(1) expectation.
+		errLogged := make(chan struct{})
 
 		mockLogger := mocks.NewMockLogger(ctrl)
 		mockHttpClient := mocks.NewMockHttpClient(ctrl)
 		mockLogger.EXPECT().Debugf("run polling").MinTimes(1)
 		mockLogger.EXPECT().Debugf("stop polling").MinTimes(1)
-		mockLogger.EXPECT().Errorf("poll error: %s", errExpected).MinTimes(1)
-		mockHttpClient.EXPECT().Do(gomock.Any()).DoAndReturn(func(_ *http.Request) (*http.Response, error) {
-			close(pingCalled)
-			return nil, errExpected
-		})
+		mockLogger.EXPECT().Errorf("poll error: %s", errExpected).
+			Do(func(string, ...interface{}) { close(errLogged) }).Times(1)
+		mockHttpClient.EXPECT().Do(gomock.Any()).Return(nil, errExpected).Times(1)
 
 		onClose := make(chan error, 1)
 		client := &Transport{
@@ -336,9 +340,10 @@ func TestPollingLoop(t *testing.T) {
 
 		go func() {
 			select {
-			case <-pingCalled:
-			case <-time.After(100 * time.Millisecond):
-				assert.Fail(t, "expected ping to be called")
+			case <-errLogged:
+			case <-time.After(2 * time.Second):
+				assert.Fail(t, "expected poll error to be logged")
+				return
 			}
 
 			assert.NoError(t, client.Stop())
@@ -1636,4 +1641,101 @@ func TestHandshakeGateUpgradeToPolling(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("expected onClose after Stop")
 	}
+}
+
+// TestPollingLoopFatalStatus verifies that a 4xx poll response (e.g. 400
+// "Session ID unknown" after a server restart) stops the loop and reports the
+// error on onClose, so the engine client's reconnect supervisor can start a
+// fresh session instead of the loop retrying a dead sid forever.
+func TestPollingLoopFatalStatus(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	onClose := make(chan error, 1)
+	client := &Transport{
+		log:         mockLogger,
+		httpClient:  mockHTTPClient,
+		url:         &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+		sid:         "dead-sid",
+		ctx:         ctx,
+		messages:    make(chan []byte, 1),
+		onClose:     onClose,
+		stopPooling: make(chan struct{}, 1),
+	}
+
+	mockHTTPClient.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: 400,
+		Body:       io.NopCloser(strings.NewReader(`{"code":1,"message":"Session ID unknown"}`)),
+	}, nil)
+
+	err := client.pollingLoop()
+	assert.ErrorContains(t, err, "unexpected polling response status 400")
+
+	select {
+	case reported := <-onClose:
+		assert.ErrorContains(t, reported, "unexpected polling response status 400",
+			"onClose must carry the fatal error so the supervisor reconnects")
+	default:
+		t.Fatal("fatal poll error was not reported on onClose")
+	}
+	assert.Equal(t, uint32(1), atomic.LoadUint32(&client.stopped), "transport must be marked stopped")
+}
+
+// TestPollingLoopTransientServerError verifies that a 5xx response stays on
+// the transient path: the loop backs off and retries instead of stopping.
+func TestPollingLoopTransientServerError(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockLogger := mocks.NewMockLogger(ctrl)
+	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).AnyTimes()
+	mockHTTPClient := mocks.NewMockHttpClient(ctrl)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	onClose := make(chan error, 1)
+	client := &Transport{
+		log:              mockLogger,
+		httpClient:       mockHTTPClient,
+		url:              &url.URL{Scheme: "http", Host: "example.com", Path: "/socket.io/"},
+		sid:              "test-sid",
+		ctx:              ctx,
+		messages:         make(chan []byte, 1),
+		onClose:          onClose,
+		stopPooling:      make(chan struct{}, 1),
+		pollErrorBackoff: time.Millisecond,
+	}
+
+	calls := 0
+	mockHTTPClient.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return &http.Response{
+				StatusCode: 503,
+				Body:       io.NopCloser(strings.NewReader("busy")),
+			}, nil
+		}
+		// Second poll: stop the loop cleanly.
+		client.stopPooling <- struct{}{}
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader("2")),
+		}, nil
+	}).AnyTimes()
+
+	err := client.pollingLoop()
+	assert.NoError(t, err, "a 5xx response must be retried, not treated as fatal")
+	assert.GreaterOrEqual(t, calls, 2, "the loop must retry after a 5xx response")
 }

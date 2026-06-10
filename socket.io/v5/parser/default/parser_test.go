@@ -936,3 +936,45 @@ var typedEvent = []interface{}{
 	},
 	[]string{"a", "b", "c"},
 }
+
+// TestWrapCallback_VariadicNoPayload verifies that a variadic handler — the
+// natural shape for reserved lifecycle events ("reconnect", "reconnecting",
+// "reconnect_failed"), which are dispatched with no payload — is invoked with
+// an empty argument list instead of being rejected by the arity check.
+func TestWrapCallback_VariadicNoPayload(t *testing.T) {
+	t.Parallel()
+	parser := NewParser(WithLogger(logger))
+
+	t.Run("variadic only, nil payload", func(t *testing.T) {
+		t.Parallel()
+		called := false
+		callback := parser.WrapCallback(func(args ...interface{}) {
+			assert.Empty(t, args)
+			called = true
+		})
+		callback(nil)
+		assert.True(t, called, "variadic handler must fire for a no-payload event")
+	})
+
+	t.Run("fixed plus variadic still requires the fixed args", func(t *testing.T) {
+		t.Parallel()
+		called := false
+		callback := parser.WrapCallback(func(_ string, _ ...interface{}) {
+			called = true
+		})
+		callback(nil)
+		assert.False(t, called, "missing fixed arguments must still be rejected")
+	})
+
+	t.Run("fixed plus variadic with exactly the fixed args", func(t *testing.T) {
+		t.Parallel()
+		called := false
+		callback := parser.WrapCallback(func(s string, rest ...interface{}) {
+			assert.Equal(t, "hello", s)
+			assert.Empty(t, rest)
+			called = true
+		})
+		callback([]interface{}{json.RawMessage(`"hello"`)})
+		assert.True(t, called)
+	})
+}
