@@ -253,3 +253,103 @@ func TestE2E_BinaryWebsocketOnly(t *testing.T) {
 func TestE2E_Namespace(t *testing.T) {
 	runScenario(t, newClient(t, "default", socketio.WithDefaultNamespace("/admin")))
 }
+
+// runRichBinaryScenario exercises the harder corners of the binary protocol
+// against the real server: multiple attachments in one packet (both
+// directions) and a nested object mixing a Buffer, a null and a string —
+// asserting placeholder substitution at nested positions and that nil byte
+// slices stay JSON null rather than becoming empty attachments.
+func runRichBinaryScenario(t *testing.T, client *socketio.Client) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	connected := make(chan struct{}, 1)
+	client.On("connect", func() {
+		select {
+		case connected <- struct{}{}:
+		default:
+		}
+	})
+
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+
+	select {
+	case <-connected:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for connect event")
+	}
+
+	// Two attachments in one packet, echoed back as two attachments.
+	first := []byte{0x01, 0x02, 0x03}
+	second := []byte{0xFF, 0x00, 0x7F, 0x80}
+	multiAck := make(chan [2][]byte, 1)
+	if err := client.Emit("binMulti", first, second, emit.WithAck(func(a, b []byte) {
+		select {
+		case multiAck <- [2][]byte{a, b}:
+		default:
+		}
+	})); err != nil {
+		t.Fatalf("emit binMulti: %v", err)
+	}
+	select {
+	case got := <-multiAck:
+		if string(got[0]) != string(first) || string(got[1]) != string(second) {
+			t.Fatalf("binMulti ack = %v/%v, want %v/%v", got[0], got[1], first, second)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for binMulti ack")
+	}
+
+	// A nested object: Buffer at a key, an explicit null (sent as a nil byte
+	// slice, which must serialize as JSON null) and a plain string.
+	type nested struct {
+		File []byte  `json:"file"`
+		Note *string `json:"note"`
+		Name string  `json:"name"`
+	}
+	payload := map[string]interface{}{
+		"file": []byte("attachment-bytes"),
+		"note": []byte(nil), // nil []byte must arrive as null, not an empty Buffer
+		"name": "report.bin",
+	}
+	nestedAck := make(chan nested, 1)
+	if err := client.Emit("binNested", payload, emit.WithAck(func(obj nested) {
+		select {
+		case nestedAck <- obj:
+		default:
+		}
+	})); err != nil {
+		t.Fatalf("emit binNested: %v", err)
+	}
+	select {
+	case got := <-nestedAck:
+		if string(got.File) != "attachment-bytes" {
+			t.Fatalf("binNested file = %q, want %q", got.File, "attachment-bytes")
+		}
+		if got.Note != nil {
+			t.Fatalf("binNested note = %q, want JSON null (nil)", *got.Note)
+		}
+		if got.Name != "report.bin" {
+			t.Fatalf("binNested name = %q, want %q", got.Name, "report.bin")
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for binNested ack")
+	}
+}
+
+func TestE2E_BinaryRich_DefaultTransport(t *testing.T) {
+	runRichBinaryScenario(t, newClient(t, "default"))
+}
+
+func TestE2E_BinaryRich_PollingOnly(t *testing.T) {
+	runRichBinaryScenario(t, newClient(t, "polling"))
+}
+
+func TestE2E_BinaryRich_WebsocketOnly(t *testing.T) {
+	runRichBinaryScenario(t, newClient(t, "websocket"))
+}
