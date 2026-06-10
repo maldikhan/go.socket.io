@@ -163,9 +163,10 @@ func TestSocketIOV5DefaultParser_Parse(t *testing.T) {
 		},
 	}
 
-	parser := NewParser(
+	parser, err := NewParser(
 		WithLogger(logger),
 	)
+	require.NoError(t, err)
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
@@ -355,9 +356,10 @@ func TestSocketIOV5DefaultParser_parseEvent(t *testing.T) {
 		},
 	}
 
-	parser := NewParser(
+	parser, err := NewParser(
 		WithLogger(logger),
 	)
+	require.NoError(t, err)
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
@@ -400,14 +402,15 @@ func TestSocketIOV5DefaultParser_parseEvent(t *testing.T) {
 		mockPayloadParser := mock_socketio_v5_parser_default.NewMockPayloadParser(ctrl)
 		defer ctrl.Finish()
 
-		parser := NewParser(
+		parser, err := NewParser(
 			WithLogger(logger),
 			WithPayloadParser(mockPayloadParser),
 		)
+		require.NoError(t, err)
 
 		mockPayloadParser.EXPECT().ParseEvent([]byte("123"), false).Return(&socketio_v5.Event{}, nil)
 
-		_, err := parser.ParseEvent([]byte("123"), false)
+		_, err = parser.ParseEvent([]byte("123"), false)
 		assert.Nil(t, err)
 	})
 }
@@ -639,9 +642,10 @@ func TestSocketIOV5DefaultParser_Serialize(t *testing.T) {
 			want: []byte("344[]"),
 		},
 	}
-	parser := NewParser(
+	parser, err := NewParser(
 		WithLogger(logger),
 	)
+	require.NoError(t, err)
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
@@ -663,9 +667,10 @@ func TestThreadSafety(t *testing.T) {
 		Arg int `json:"arg"`
 	}
 
-	parser := NewParser(
+	parser, err := NewParser(
 		WithLogger(logger),
 	)
+	require.NoError(t, err)
 
 	callback := parser.WrapCallback(func(arg *E, z []int) {
 		assert.Equal(t, []int{11, 12, 13}, z)
@@ -694,9 +699,10 @@ func TestWrapCallback(t *testing.T) {
 	event, err := json.Marshal(typedEvent)
 	assert.NoError(t, err)
 
-	parser := NewParser(
+	parser, err := NewParser(
 		WithLogger(logger),
 	)
+	require.NoError(t, err)
 
 	t.Run(fmt.Sprintf("%T-%s", parser, "json"), func(t *testing.T) {
 		t.Parallel()
@@ -843,9 +849,10 @@ func TestMsgSerializeRestore(t *testing.T) {
 		},
 	}
 
-	parser := NewParser(
+	parser, err := NewParser(
 		WithLogger(logger),
 	)
+	require.NoError(t, err)
 
 	for _, tt := range tests {
 		tt := tt

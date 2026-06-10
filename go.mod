@@ -1,6 +1,6 @@
 module github.com/maldikhan/go.socket.io
 
-go 1.18
+go 1.21
 
 require (
 	github.com/golang/mock v1.6.0

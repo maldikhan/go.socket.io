@@ -7,10 +7,16 @@ import (
 	"fmt"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 )
+
+// ErrConnectAborted is returned by Connect (with a connect timeout
+// configured) when a concurrent Close() aborts the connection phase before
+// the timeout elapses and before the caller's context is cancelled.
+var ErrConnectAborted = errors.New("engine.io: connect aborted: client closed")
 
 type Client struct {
 	url                 *url.URL
@@ -26,6 +32,7 @@ type Client struct {
 	closeHandler        func()
 	reconnectAttempts   int
 	reconnectWait       time.Duration
+	connectTimeout      time.Duration
 	waitUpgrade         chan struct{}
 	hadUpgrade          sync.Once
 	waitHandshake       chan struct{}
@@ -40,6 +47,19 @@ type Client struct {
 	// the waitUpgrade / waitHandshake channels so that Send() never
 	// races with transportUpgrade() or Close().
 	transportMu sync.RWMutex
+
+	// handshakeErr records a handshake/upgrade failure that released the
+	// connection gates without establishing the session, so a timed Connect()
+	// waiting on those gates reports the failure instead of success. Set by
+	// handleHandshake, cleared by connect() when the gates are re-armed.
+	// Guarded by transportMu.
+	handshakeErr error
+
+	// connectCancel cancels the connection context created by Connect() when
+	// a connect timeout is configured. It is stored so Close() can release the
+	// context (and its resources) early instead of waiting for the parent
+	// context to be cancelled. Guarded by transportMu.
+	connectCancel context.CancelFunc
 
 	// handlerMu protects access to the handler fields
 	// (messageHandler, closeHandler, afterConnect).
@@ -64,7 +84,144 @@ func (c *Client) payload(data []byte) string {
 	return string(data)
 }
 
+// Connect establishes the engine.io connection. ctx controls the lifetime of
+// the whole session: cancelling it stops the transports and the message loop.
+//
+// When a connect timeout is configured via WithConnectTimeout, the timeout
+// applies only to the connection phase (transport dial, handshake request and
+// the OPEN packet, including an eventual transport upgrade): Connect blocks
+// until the handshake completes and returns context.DeadlineExceeded if it
+// does not finish in time, while a successfully established session keeps
+// running for as long as ctx allows. Without the option, Connect returns as
+// soon as the handshake request is sent (previous behavior).
 func (c *Client) Connect(ctx context.Context) error {
+	if c.connectTimeout <= 0 {
+		return c.connect(ctx)
+	}
+
+	// connCtx drives the dial/handshake phase. On success it simply remains
+	// the session context: it is derived from ctx, so the caller's
+	// cancellation still propagates, and it is only cancelled early (by the
+	// timer below) when the handshake does not complete in time.
+	connCtx, connCancel := context.WithCancel(ctx)
+	c.transportMu.Lock()
+	c.connectCancel = connCancel
+	c.transportMu.Unlock()
+
+	// timerFired distinguishes the timeout timer cancelling connCtx from a
+	// concurrent Close() invoking the same cancel func: both leave
+	// connCtx.Err() non-nil with the caller's ctx still live, but only the
+	// former is a timeout.
+	// timerDone is closed when the timeout callback has finished running, so
+	// the success path can synchronize with a callback that Stop() failed to
+	// prevent (Stop() does not wait for an in-flight AfterFunc to complete).
+	var timerFired atomic.Bool
+	timerDone := make(chan struct{})
+	timer := time.AfterFunc(c.connectTimeout, func() {
+		defer close(timerDone)
+		timerFired.Store(true)
+		connCancel()
+	})
+
+	// connectErr names the actual cause of an aborted connect: the caller's
+	// context, the timeout timer, or (when it is neither) a concurrent Close().
+	connectErr := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if timerFired.Load() {
+			return fmt.Errorf("engine.io: connect timeout after %s: %w", c.connectTimeout, context.DeadlineExceeded)
+		}
+		return ErrConnectAborted
+	}
+
+	err := c.connect(connCtx)
+	if err != nil {
+		// Check connCtx before releasing it: connCancel() below sets
+		// connCtx.Err() unconditionally, which would mask the real cause.
+		aborted := connCtx.Err() != nil
+		timer.Stop()
+		connCancel()
+		// connect() already stopped the transport and joined the message loop
+		// on its error paths, but it leaves the handshake gate it published
+		// open and the transport field set. Mark the client closed so a
+		// concurrent or subsequent Send() wakes from the gate, observes the
+		// nil transport and fails fast instead of blocking forever. The
+		// transport needs no further Stop() here — connect() owns that.
+		c.markClosed()
+		if aborted {
+			// The connect context was cancelled — by the caller, the timeout
+			// timer or a concurrent Close(); name the actual cause.
+			return connectErr()
+		}
+		return err
+	}
+
+	// The handshake request is sent; wait for the OPEN packet (handleHandshake
+	// closes the waitHandshake gate after an eventual transport upgrade).
+	c.transportMu.RLock()
+	wh := c.waitHandshake
+	c.transportMu.RUnlock()
+
+	select {
+	case <-wh:
+		// Handshake complete. If a transport upgrade was initiated, also wait
+		// for the probe/pong exchange: handleHandshake publishes waitUpgrade
+		// before closing waitHandshake, and the gate is only closed once the
+		// upgrade finishes (or fails). Without this, Connect() could return
+		// success while Send() still blocks on the unfinished upgrade.
+		c.transportMu.RLock()
+		wu := c.waitUpgrade
+		c.transportMu.RUnlock()
+		if wu != nil {
+			select {
+			case <-wu:
+			case <-connCtx.Done():
+			}
+		}
+		if !timer.Stop() {
+			// The timeout callback already started in its own goroutine; wait
+			// for it to finish before judging success. Otherwise Connect could
+			// observe connCtx still live, return nil, and the in-flight
+			// callback would then cancel the context now serving the
+			// established session, tearing it down at the timeout boundary.
+			<-timerDone
+		}
+		// The gates are also released by Close() (so parked Send()s fail fast)
+		// and by a failed transport upgrade, so waking here does not by itself
+		// mean the handshake succeeded: a concurrent Close() or an upgrade
+		// error must not let Connect report success. Only return success when
+		// the client is still live and no handshake failure was recorded.
+		c.transportMu.RLock()
+		closed := c.transport == nil
+		hsErr := c.handshakeErr
+		c.transportMu.RUnlock()
+		if connCtx.Err() == nil && !closed && hsErr == nil {
+			return nil
+		}
+		if hsErr != nil && connCtx.Err() == nil {
+			// The handshake/upgrade itself failed: tear down and surface that
+			// error rather than a generic cancellation cause.
+			_ = c.Close()
+			return fmt.Errorf("engine.io: connect failed: %w", hsErr)
+		}
+		// The timeout fired (or the client was closed) while the handshake was
+		// completing: the transports are already shutting down, so report the
+		// failure to the caller.
+	case <-connCtx.Done():
+		timer.Stop()
+	}
+
+	// The connection phase was aborted (timeout, caller cancellation or a
+	// concurrent Close): tear down whatever was started and name the cause.
+	_ = c.Close()
+	return connectErr()
+}
+
+// connect performs the connection sequence: it runs the transport, starts the
+// message loop and sends the handshake request. It does not wait for the
+// handshake response.
+func (c *Client) connect(ctx context.Context) error {
 	c.ctx = ctx
 
 	c.messages = make(chan []byte, 100)
@@ -85,6 +242,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.transportMu.Lock()
 	c.hadHandshake = sync.Once{}
 	c.waitHandshake = make(chan struct{}, 1)
+	c.handshakeErr = nil
 	c.transportMu.Unlock()
 
 	err = c.transport.RequestHandshake()
@@ -176,17 +334,34 @@ func (c *Client) transportUpgrade(transport Transport) error {
 	return err
 }
 
+// failHandshake records a definitive handshake failure (e.g. a malformed OPEN
+// packet) and releases the handshake gate, so a timed Connect() waiting on the
+// gate wakes immediately and reports the protocol error instead of paying the
+// full connect timeout, and parked Send() callers are unblocked. The error is
+// recorded BEFORE the gate is released so the waker is guaranteed to see it.
+func (c *Client) failHandshake(err error) error {
+	c.transportMu.Lock()
+	c.handshakeErr = err
+	c.transportMu.Unlock()
+	c.hadHandshake.Do(func() {
+		if c.waitHandshake != nil {
+			close(c.waitHandshake)
+		}
+	})
+	return err
+}
+
 func (c *Client) handleHandshake(data []byte) error {
 	c.log.Debugf("apply handshake: %s", c.payload(data))
 
 	handshakeResp := &engineio_v4.HandshakeResponse{}
 	err := json.Unmarshal(data, handshakeResp)
 	if err != nil {
-		return err
+		return c.failHandshake(err)
 	}
 
 	if handshakeResp.Sid == "" {
-		return fmt.Errorf("handshake error: no sid")
+		return c.failHandshake(fmt.Errorf("handshake error: no sid"))
 	}
 
 	// Upgrade transports
@@ -221,6 +396,13 @@ func (c *Client) handleHandshake(data []byte) error {
 			if newTransport, found := c.supportedTransports[engineio_v4.EngineIOTransport(newTransportName)]; found {
 				err = c.transportUpgrade(newTransport)
 				if err != nil {
+					// Record the failure BEFORE releasing the gate: a timed
+					// Connect() waiting on waitHandshake must observe it and
+					// report the failed upgrade instead of success (gate
+					// closure alone does not mean the connect succeeded).
+					c.transportMu.Lock()
+					c.handshakeErr = err
+					c.transportMu.Unlock()
 					// Close the handshake gate so that any Send() caller
 					// waiting on waitHandshake doesn't block forever.
 					c.hadHandshake.Do(func() {
@@ -298,15 +480,23 @@ func (c *Client) handlePacket(packetData []byte) error {
 			err := c.sendPacket(&engineio_v4.Message{
 				Type: engineio_v4.PacketUpgrade,
 			})
+			if err != nil {
+				// Record the failure BEFORE releasing the upgrade gate (like
+				// the transportUpgrade error path does for the handshake
+				// gate): a timed Connect() waiting on waitUpgrade must report
+				// the failed upgrade write instead of success.
+				c.transportMu.Lock()
+				c.handshakeErr = err
+				c.transportMu.Unlock()
+			}
 			c.hadUpgrade.Do(func() {
 				close(c.waitUpgrade)
 			})
 			if err != nil {
 				c.log.Errorf("send upgrade error: %s", err)
 				return err
-			} else {
-				c.log.Debugf("Protocol upgraded")
 			}
+			c.log.Debugf("Protocol upgraded")
 		}
 	case engineio_v4.PacketMessage:
 		c.handlerMu.RLock()
@@ -382,15 +572,44 @@ func (c *Client) On(event string, handler func([]byte)) {
 	}
 }
 
-func (c *Client) Close() error {
+// markClosed makes the client observably closed for Send() callers: it nils
+// the transport and releases the handshake/upgrade gates under transportMu, so
+// a Send() parked on a gate that will never complete wakes up, sees the nil
+// transport and fails fast with "client is closed". It returns the previous
+// transport (nil when already closed) and the pending connect-cancel func so
+// the caller can finish the teardown it owns.
+func (c *Client) markClosed() (Transport, context.CancelFunc) {
 	// Write-lock to prevent new Send() calls from acquiring the transport
 	// while we are tearing it down. Setting transport to nil ensures that
-	// any Send() arriving after Close releases the lock will see nil and
-	// fail fast instead of writing on a stopped transport.
+	// any Send() arriving after the lock is released will see nil and fail
+	// fast instead of writing on a stopped transport.
 	c.transportMu.Lock()
+	defer c.transportMu.Unlock()
 	t := c.transport
 	c.transport = nil
-	c.transportMu.Unlock()
+	connectCancel := c.connectCancel
+	c.connectCancel = nil
+	c.hadHandshake.Do(func() {
+		if c.waitHandshake != nil {
+			close(c.waitHandshake)
+		}
+	})
+	c.hadUpgrade.Do(func() {
+		if c.waitUpgrade != nil {
+			close(c.waitUpgrade)
+		}
+	})
+	return t, connectCancel
+}
+
+func (c *Client) Close() error {
+	t, connectCancel := c.markClosed()
+
+	// Release the connection context created by Connect() (when a connect
+	// timeout is configured) so it does not stay parked on the parent context.
+	if connectCancel != nil {
+		defer connectCancel()
+	}
 
 	// Stop the ping ticker to prevent goroutine leak
 	if c.pingInterval != nil {
