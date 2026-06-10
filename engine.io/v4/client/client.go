@@ -93,6 +93,13 @@ type Client struct {
 	// races with transportUpgrade() or Close().
 	transportMu sync.RWMutex
 
+	// handshakeErr records a handshake/upgrade failure that released the
+	// handshake gate without establishing the session, so a reconnect attempt
+	// waiting on that gate reports the failure instead of success. Set by
+	// handleHandshake's upgrade-error path before the gate is closed, cleared
+	// by startConnection when the gate is re-armed. Guarded by transportMu.
+	handshakeErr error
+
 	// handlerMu protects access to the handler fields
 	// (messageHandler, closeHandler, afterConnect).
 	// On() writes them from the user goroutine, while handlePacket()
@@ -238,6 +245,7 @@ func (c *Client) startConnection(ctx context.Context) error {
 	c.transportMu.Lock()
 	c.hadHandshake = sync.Once{}
 	c.waitHandshake = make(chan struct{}, 1)
+	c.handshakeErr = nil
 	c.transportMu.Unlock()
 
 	err = transport.RequestHandshake()
@@ -462,6 +470,14 @@ func (c *Client) handleHandshake(data []byte) error {
 			if newTransport, found := c.supportedTransports[engineio_v4.EngineIOTransport(newTransportName)]; found {
 				err = c.transportUpgrade(newTransport)
 				if err != nil {
+					// Record the failure BEFORE releasing the gate: a reconnect
+					// attempt waiting on waitHandshake must observe it and
+					// report the failed upgrade instead of a successful
+					// reconnect (gate closure alone does not mean the session
+					// was established).
+					c.transportMu.Lock()
+					c.handshakeErr = err
+					c.transportMu.Unlock()
 					// Close the handshake gate so that any Send() caller
 					// waiting on waitHandshake doesn't block forever.
 					c.hadHandshake.Do(func() {

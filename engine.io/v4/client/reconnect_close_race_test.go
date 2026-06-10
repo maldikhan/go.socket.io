@@ -596,3 +596,105 @@ func TestCloseReleasesGates(t *testing.T) {
 		t.Fatal("Send stayed parked on the gates after Close")
 	}
 }
+
+// TestAwaitConnectionEstablishedUpgradeFailure reproduces the review finding:
+// handleHandshake's upgrade-error path closes waitHandshake (to wake parked
+// senders) after recording the failure in handshakeErr. A reconnect attempt
+// waiting on that gate must treat the closure as a FAILED attempt — tearing
+// the half-open cycle down and letting the loop retry — not as a successful
+// reconnect on a connection whose transports were stopped mid-upgrade.
+func TestAwaitConnectionEstablishedUpgradeFailure(t *testing.T) {
+	t.Parallel()
+
+	t.Run("probe failure leaves the new transport running", func(t *testing.T) {
+		t.Parallel()
+		client, transport, _, _ := newReconnectClient(t)
+		client.transportMu.Lock()
+		client.waitHandshake = make(chan struct{}, 1)
+		client.transportClosed = make(chan error, 1)
+		client.handshakeErr = errors.New("probe send failed")
+		client.transportMu.Unlock()
+		// The gate is released by the upgrade-error path after the error is
+		// recorded.
+		client.hadHandshake.Do(func() { close(client.waitHandshake) })
+
+		// The teardown must stop the still-running transport of the half-open
+		// attempt. Stop may race the photo-finish select arm, so the close
+		// notification may or may not be drained here — both are valid.
+		transport.EXPECT().Stop().DoAndReturn(func() error {
+			select {
+			case client.transportClosed <- nil:
+			default:
+			}
+			return nil
+		})
+
+		assert.False(t, client.awaitConnectionEstablished(time.Second),
+			"a failed upgrade must not be reported as a successful reconnect")
+	})
+
+	t.Run("upgrade run failure already closed transportClosed", func(t *testing.T) {
+		t.Parallel()
+		client, transport, _, _ := newReconnectClient(t)
+		client.transportMu.Lock()
+		client.waitHandshake = make(chan struct{}, 1)
+		// transportUpgrade closes the fresh channel itself when the new
+		// transport's Run fails; the teardown must not close it a second time.
+		closed := make(chan error)
+		close(closed)
+		client.transportClosed = closed
+		client.handshakeErr = errors.New("run websocket failed")
+		client.transportMu.Unlock()
+		client.hadHandshake.Do(func() { close(client.waitHandshake) })
+
+		transport.EXPECT().Stop().Return(nil)
+
+		assert.False(t, client.awaitConnectionEstablished(time.Second))
+	})
+}
+
+// A gate closed while Close() is in progress must not report success even when
+// the close raced ahead of the handshake (first-select arm of the wait).
+func TestAwaitConnectionEstablishedClosedGateWhileClosing(t *testing.T) {
+	t.Parallel()
+	client, _, _, _ := newReconnectClient(t)
+	client.transportMu.Lock()
+	client.waitHandshake = make(chan struct{}, 1)
+	client.transportMu.Unlock()
+	client.hadHandshake.Do(func() { close(client.waitHandshake) })
+	atomic.StoreUint32(&client.closing, 1)
+
+	assert.False(t, client.awaitConnectionEstablished(time.Second),
+		"a gate released by Close's teardown is not a completed handshake")
+}
+
+// TestSuperviseContextErrorOnTransportClosed reproduces the review finding: a
+// cancelled run context makes the transports report ctx.Err() on the
+// transportClosed channel, and the supervisor's select may receive that error
+// before noticing the context cancellation. That is a normal shutdown — it
+// must not fire "reconnecting" (or the close handler when reconnect is
+// disabled).
+func TestSuperviseContextErrorOnTransportClosed(t *testing.T) {
+	t.Parallel()
+	client, _, _, _ := newReconnectClient(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	client.ctx = ctx
+	cancel()
+
+	fired := make(chan struct{}, 1)
+	client.reconnectingHandler = func() { fired <- struct{}{} }
+	client.closeHandler = func() { fired <- struct{}{} }
+
+	// The transport reports the cancellation as a close error; the buffered
+	// value is available immediately, so the select can take the closed arm.
+	closed := make(chan error, 1)
+	closed <- ctx.Err()
+	done := make(chan struct{})
+	client.supervise(closed, done)
+
+	select {
+	case <-fired:
+		t.Fatal("supervise started reconnect logic for a context-based shutdown")
+	default:
+	}
+}

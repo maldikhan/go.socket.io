@@ -87,9 +87,12 @@ func (c *Client) supervise(closed chan error, done chan struct{}) {
 		return
 	}
 
-	// Close() sets closing before stopping the transport. If the drop is the
-	// result of an intentional Close we must not attempt to reconnect.
-	if atomic.LoadUint32(&c.closing) == 1 {
+	// Close() sets closing before stopping the transport, and a cancelled run
+	// context makes the transports report ctx.Err() on transportClosed — this
+	// select may receive that error before noticing ctxDone. Both are
+	// intentional shutdowns: starting reconnect logic (or invoking the close
+	// handler below) would emit spurious lifecycle events, so bail out first.
+	if c.stopRequested() {
 		return
 	}
 
@@ -230,7 +233,17 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 		// Close() also releases the handshake gate (so parked Send()s fail
 		// fast); a gate closed by that teardown — not by a real handshake —
 		// must not be reported as a successful reconnect.
-		return !c.stopRequested()
+		if c.stopRequested() {
+			return false
+		}
+		if c.handshakeFailure() == nil {
+			return true
+		}
+		// The gate was released by handleHandshake's upgrade-error path: the
+		// handshake never established a session and the half-open attempt may
+		// have already stopped its transports mid-upgrade. Fall through to the
+		// abandon teardown below so the loop retries with fresh state instead
+		// of firing "reconnect" for a dead connection.
 	case <-ctxDone:
 		// Context cancellation winds the transports and the message loop down
 		// on its own, but nothing ever closes this cycle's handshake gate;
@@ -250,13 +263,17 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 	// is abandoned, so after this section there is exactly one consumer (us or
 	// an already-started supervisor) for the close notification.
 	c.transportMu.Lock()
+	completed := false
 	select {
 	case <-wh:
-		c.transportMu.Unlock()
-		// Same guard as above: a gate released by Close()'s teardown is not a
-		// completed handshake.
-		return !c.stopRequested()
+		// Same guards as above: a gate released by Close()'s teardown or by a
+		// failed upgrade is not a completed handshake.
+		completed = c.handshakeErr == nil
 	default:
+	}
+	if completed {
+		c.transportMu.Unlock()
+		return !c.stopRequested()
 	}
 	atomic.StoreUint32(&c.cycleAbandoned, 1)
 	transport := c.transport
@@ -266,10 +283,14 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 	if transport != nil {
 		_ = transport.Stop()
 		select {
-		case <-closed:
+		case _, ok := <-closed:
 			// Single close notification consumed; close the channel so a later
-			// Close() doesn't block draining it.
-			close(closed)
+			// Close() doesn't block draining it. When the failed upgrade
+			// already closed the channel (its new transport never ran), ok is
+			// false and there is nothing left to close.
+			if ok {
+				close(closed)
+			}
 		case <-wh:
 			// Photo-finish: the handshake completed while we were stopping the
 			// transport and its supervisor consumed the close notification (it
@@ -286,6 +307,15 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 	// fast against the stopped transport.
 	c.releaseGates()
 	return false
+}
+
+// handshakeFailure returns the handshake/upgrade error recorded for the
+// current connection cycle, if any. A non-nil value means the handshake gate
+// was released by a failure path, not by an established session.
+func (c *Client) handshakeFailure() error {
+	c.transportMu.RLock()
+	defer c.transportMu.RUnlock()
+	return c.handshakeErr
 }
 
 // stopRequested reports whether the reconnect loop should abort because the
