@@ -68,6 +68,12 @@ type Client struct {
 	// connection cycle exits. Close() waits on it instead of reading
 	// transportClosed directly, because the supervisor owns that channel.
 	supervisorDone chan struct{}
+	// attemptInFlight is 1 while startConnection is between its first state
+	// reset and its final return. During that window the attempt owns the
+	// cycle's transportClosed teardown (every exit path drains and closes it,
+	// then closes supervisorDone), so Close() must wait on supervisorDone
+	// instead of competing for the single transportClosed value.
+	attemptInFlight uint32
 
 	// closeCh is closed exactly once by Close() to wake any goroutine parked in
 	// the reconnect backoff wait, so Close() returns promptly instead of blocking
@@ -141,8 +147,17 @@ func (c *Client) startConnection(ctx context.Context) error {
 	// websocket transport (whose RequestHandshake is a no-op) back to the polling
 	// transport that performs a real handshake. Close() sets the transport to nil;
 	// if a reconnect attempt races with Close() we must bail out instead of
-	// dereferencing a nil transport.
+	// dereferencing a nil transport — and we must not restore the transport after
+	// Close() already nil'ed it, or the attempt would resurrect a closed client.
 	c.transportMu.Lock()
+	if atomic.LoadUint32(&c.closing) == 1 {
+		c.transportMu.Unlock()
+		return errClientClosed
+	}
+	// From here on this attempt owns the cycle teardown; Close() observing the
+	// flag will wait on supervisorDone (closed by every exit path below)
+	// instead of draining transportClosed itself.
+	atomic.StoreUint32(&c.attemptInFlight, 1)
 	if c.initialTransport != nil {
 		c.transport = c.initialTransport
 	}
@@ -150,34 +165,55 @@ func (c *Client) startConnection(ctx context.Context) error {
 	transport := c.transport
 	c.transportMu.Unlock()
 	if transport == nil {
+		atomic.StoreUint32(&c.attemptInFlight, 0)
 		return errClientClosed
 	}
 
-	c.messages = make(chan []byte, 100)
-
-	// Reset the supervisor guard so the next successful handshake starts a fresh
-	// supervisor for this connection cycle, and create the done channel it will
-	// close on exit.
+	// Reset the per-cycle supervisor state under the lock so Close() observes a
+	// consistent pair: a fresh supervisorDone always comes with
+	// supervisorStarted == 0 (no goroutine owns the new channel until the next
+	// successful handshake runs startSupervisor). Without this, Close() racing
+	// with an in-flight reconnect attempt could wait on a supervisorDone channel
+	// that no goroutine will ever close — a deadlock.
+	transportClosed := make(chan error, 1)
+	messages := make(chan []byte, 100)
+	c.transportMu.Lock()
+	c.messages = messages
 	c.superviseOnce = sync.Once{}
 	c.supervisorDone = make(chan struct{})
+	atomic.StoreUint32(&c.supervisorStarted, 0)
 
 	// Reset the upgrade gate: a previous cycle may have left waitUpgrade closed
 	// and hadUpgrade fired. They are re-armed lazily by transportUpgrade(), but
 	// clearing them here keeps Send() from observing a stale, closed gate from
 	// the prior connection.
-	c.transportMu.Lock()
 	c.hadUpgrade = sync.Once{}
 	c.waitUpgrade = nil
-	c.transportMu.Unlock()
 
 	// Run transport before starting the message loop so that a Run()
 	// failure doesn't leak a goroutine.
-	c.transportClosed = make(chan error, 1)
-	err := transport.Run(ctx, c.url, c.sid, c.messages, c.transportClosed)
+	c.transportClosed = transportClosed
+	c.transportMu.Unlock()
+
+	err := transport.Run(ctx, c.url, c.sid, messages, transportClosed)
 	if err != nil {
-		close(c.transportClosed)
+		close(transportClosed)
 		close(c.supervisorDone)
+		atomic.StoreUint32(&c.attemptInFlight, 0)
 		return err
+	}
+
+	// Close() may have raced with this attempt between the closing check above
+	// and transport.Run: such a Close() stopped a transport that was not running
+	// yet, so its stop had no effect. Re-check and tear the fresh transport down
+	// ourselves instead of leaving a live connection behind on a closed client.
+	if atomic.LoadUint32(&c.closing) == 1 {
+		_ = transport.Stop()
+		<-transportClosed
+		close(transportClosed)
+		close(c.supervisorDone)
+		atomic.StoreUint32(&c.attemptInFlight, 0)
+		return errClientClosed
 	}
 
 	// Start the message loop only after Run() succeeds. messagesDone and
@@ -186,7 +222,6 @@ func (c *Client) startConnection(ctx context.Context) error {
 	// that reassigns the c.messages / c.messagesDone fields.
 	messagesDone := make(chan struct{})
 	messagesStop := make(chan struct{})
-	messages := c.messages
 	c.transportMu.Lock()
 	c.messagesDone = messagesDone
 	c.messagesStop = messagesStop
@@ -204,13 +239,48 @@ func (c *Client) startConnection(ctx context.Context) error {
 		// don't leak a goroutine. The cleanup operates on the channels captured
 		// for this cycle so it is unaffected by a later reconnect cycle.
 		_ = transport.Stop()
-		if c.transportClosed != nil {
-			<-c.transportClosed
-		}
+		<-transportClosed
+		// The single close notification is consumed and no sender remains;
+		// close the channel so a later Close() that drains transportClosed
+		// returns immediately instead of blocking forever.
+		close(transportClosed)
 		close(messages)
 		<-messagesDone
+		// Detach the closed channels from the client so a later Close() (e.g.
+		// after reconnect exhaustion) doesn't close messages a second time or
+		// wait on the already-finished loop.
+		c.transportMu.Lock()
+		if c.messages == messages {
+			c.messages = nil
+		}
+		if c.messagesDone == messagesDone {
+			c.messagesDone = nil
+		}
+		c.messagesStop = nil
+		c.transportMu.Unlock()
 		close(c.supervisorDone)
+		atomic.StoreUint32(&c.attemptInFlight, 0)
 		return err
+	}
+
+	// Final closing check, atomic with clearing attemptInFlight: a Close() that
+	// raced with the handshake request either locked before us (it saw
+	// attemptInFlight == 1 and is waiting on supervisorDone, which the teardown
+	// below closes) or locks after us and sees attemptInFlight == 0 with the
+	// transportClosed channel already drained and closed.
+	c.transportMu.Lock()
+	closingNow := atomic.LoadUint32(&c.closing) == 1
+	atomic.StoreUint32(&c.attemptInFlight, 0)
+	c.transportMu.Unlock()
+	if closingNow {
+		_ = transport.Stop()
+		<-transportClosed
+		close(transportClosed)
+		// Stop the message loop via its stop signal; the messages channel is
+		// left for Close() to close exactly once.
+		c.stopMessageLoop()
+		close(c.supervisorDone)
+		return errClientClosed
 	}
 
 	return nil
@@ -561,11 +631,23 @@ func (c *Client) Close() error {
 	// Write-lock to prevent new Send() calls from acquiring the transport
 	// while we are tearing it down. Setting transport to nil ensures that
 	// any Send() arriving after Close releases the lock will see nil and
-	// fail fast instead of writing on a stopped transport.
+	// fail fast instead of writing on a stopped transport. All per-cycle
+	// channels are snapshotted in the same critical section that mutates them
+	// in startConnection, so the supervisorStarted/supervisorDone pair is
+	// always consistent: a fresh (unowned) supervisorDone is only ever seen
+	// together with supervisorStarted == 0.
 	c.transportMu.Lock()
 	t := c.transport
 	c.transport = nil
 	transportClosed := c.transportClosed
+	// Wait on supervisorDone when either a supervisor goroutine owns the
+	// cycle's transportClosed channel, or a startConnection attempt is in
+	// flight (its exit paths drain transportClosed and close supervisorDone).
+	// Competing with them for the single transportClosed value would leave one
+	// of the parties blocked forever.
+	waitForCycle := atomic.LoadUint32(&c.supervisorStarted) == 1 ||
+		atomic.LoadUint32(&c.attemptInFlight) == 1
+	supervisorDone := c.supervisorDone
 	c.transportMu.Unlock()
 
 	// Stop the ping ticker to prevent goroutine leak
@@ -588,22 +670,33 @@ func (c *Client) Close() error {
 	// no supervisor is running — the handshake never completed, or we are being
 	// called from the supervisor itself on reconnect exhaustion — drain
 	// transportClosed here so the messageLoop teardown can proceed.
-	if atomic.LoadUint32(&c.supervisorStarted) == 1 {
-		if c.supervisorDone != nil {
-			<-c.supervisorDone
+	if waitForCycle {
+		if supervisorDone != nil {
+			<-supervisorDone
 		}
 	} else if transportClosed != nil {
 		<-transportClosed
 	}
 
-	if c.messages != nil {
-		close(c.messages)
+	// Read the message channels only after the cycle owner has finished: a
+	// failing startConnection attempt closes the messages channel and detaches
+	// it under the lock, so snapshotting it before the wait above could make
+	// Close() close the same channel a second time.
+	c.transportMu.Lock()
+	messages := c.messages
+	c.messages = nil
+	messagesDone := c.messagesDone
+	c.messagesDone = nil
+	c.transportMu.Unlock()
+
+	if messages != nil {
+		close(messages)
 	}
 	// Wait for messageLoop goroutine to finish so that no mock/logger
 	// calls happen after the caller returns (prevents test panics and
 	// ensures clean shutdown).
-	if c.messagesDone != nil {
-		<-c.messagesDone
+	if messagesDone != nil {
+		<-messagesDone
 	}
 	return nil
 }

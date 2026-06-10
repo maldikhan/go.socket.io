@@ -22,17 +22,28 @@ import (
 // is a no-op — there is nothing to supervise.
 func (c *Client) startSupervisor() {
 	c.superviseOnce.Do(func() {
+		// Snapshot the cycle's channels and flip supervisorStarted in the same
+		// critical section that startConnection/Close use, so Close() always
+		// observes a consistent supervisorStarted/supervisorDone pair.
 		c.transportMu.RLock()
 		closed := c.transportClosed
-		c.transportMu.RUnlock()
-		if closed == nil {
-			return
-		}
 		// Capture the done channel for THIS cycle. A successful reconnect
 		// replaces c.supervisorDone with a fresh channel, so the supervisor must
 		// close the one it was started with, not the current field.
 		done := c.supervisorDone
-		atomic.StoreUint32(&c.supervisorStarted, 1)
+		closing := atomic.LoadUint32(&c.closing) == 1
+		if closed != nil && !closing {
+			atomic.StoreUint32(&c.supervisorStarted, 1)
+		}
+		c.transportMu.RUnlock()
+		if closed == nil {
+			return
+		}
+		if closing {
+			// Close() already ran: it drained transportClosed itself, so a
+			// supervisor started now would block forever on an empty channel.
+			return
+		}
 		go c.supervise(closed, done)
 	})
 }

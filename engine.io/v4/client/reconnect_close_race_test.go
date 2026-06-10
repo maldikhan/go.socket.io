@@ -1,0 +1,232 @@
+package engineio_v4_client
+
+import (
+	"context"
+	"errors"
+	"net/url"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestCloseDuringInFlightAttemptHandshake reproduces the review finding: Close()
+// racing with a reconnect attempt that is blocked in RequestHandshake. The stale
+// supervisorStarted flag from the old supervisor must not make Close() wait on
+// the attempt's fresh (unowned) supervisorDone channel forever, and Close() must
+// not compete with the attempt's cleanup for the single transportClosed value.
+func TestCloseDuringInFlightAttemptHandshake(t *testing.T) {
+	t.Parallel()
+	client, transport, _, _ := newReconnectClient(t)
+
+	// Simulate the reconnect context: the old supervisor goroutine (which would
+	// be running reconnectLoop -> startConnection) left its flag set.
+	atomic.StoreUint32(&client.supervisorStarted, 1)
+
+	handshakeStarted := make(chan struct{})
+	handshakeAbort := make(chan struct{})
+	var abortOnce sync.Once
+
+	var onCloseCh atomic.Value // chan<- error
+	transport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *url.URL, _ string, _ chan<- []byte, onClose chan<- error) error {
+			onCloseCh.Store(onClose)
+			return nil
+		})
+	transport.EXPECT().RequestHandshake().DoAndReturn(func() error {
+		close(handshakeStarted)
+		<-handshakeAbort
+		return errors.New("handshake aborted")
+	})
+	transport.EXPECT().Stop().DoAndReturn(func() error {
+		abortOnce.Do(func() {
+			// The transport loop exits and reports once.
+			if ch, ok := onCloseCh.Load().(chan<- error); ok {
+				ch <- nil
+			}
+			close(handshakeAbort)
+		})
+		return nil
+	}).AnyTimes()
+
+	attemptDone := make(chan error, 1)
+	go func() {
+		attemptDone <- client.startConnection(context.Background())
+	}()
+
+	<-handshakeStarted
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- client.Close()
+	}()
+
+	select {
+	case err := <-closeDone:
+		assert.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close deadlocked during an in-flight reconnect attempt")
+	}
+
+	select {
+	case err := <-attemptDone:
+		assert.Error(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("startConnection did not finish after Close")
+	}
+}
+
+// TestStartConnectionAfterClose verifies the entry guard: an attempt that runs
+// after Close() must bail out with errClientClosed and must not resurrect the
+// transport that Close() already nil'ed.
+func TestStartConnectionAfterClose(t *testing.T) {
+	t.Parallel()
+	client, transport, _, _ := newReconnectClient(t)
+	client.initialTransport = transport
+
+	atomic.StoreUint32(&client.closing, 1)
+	client.transportMu.Lock()
+	client.transport = nil
+	client.transportMu.Unlock()
+
+	err := client.startConnection(context.Background())
+	assert.ErrorIs(t, err, errClientClosed)
+
+	client.transportMu.RLock()
+	defer client.transportMu.RUnlock()
+	assert.Nil(t, client.transport, "startConnection must not resurrect the transport after Close")
+}
+
+// TestStartConnectionCloseRaceAfterRun covers the window between transport.Run
+// and the message loop start: a Close() that hit that window stopped a transport
+// that was not running yet, so the attempt itself must tear the fresh transport
+// down and report errClientClosed.
+func TestStartConnectionCloseRaceAfterRun(t *testing.T) {
+	t.Parallel()
+	client, transport, _, _ := newReconnectClient(t)
+
+	var onCloseCh chan<- error
+	transport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *url.URL, _ string, _ chan<- []byte, onClose chan<- error) error {
+			onCloseCh = onClose
+			// Close() lands exactly between Run() and the post-Run check.
+			atomic.StoreUint32(&client.closing, 1)
+			return nil
+		})
+	transport.EXPECT().Stop().DoAndReturn(func() error {
+		onCloseCh <- nil
+		return nil
+	})
+
+	err := client.startConnection(context.Background())
+	assert.ErrorIs(t, err, errClientClosed)
+
+	// The cycle's channels are fully torn down: supervisorDone closed,
+	// transportClosed drained and closed.
+	select {
+	case <-client.supervisorDone:
+	default:
+		t.Fatal("supervisorDone was not closed by the teardown")
+	}
+}
+
+// TestStartConnectionCloseRaceAfterHandshake covers the window between a
+// successful RequestHandshake and startConnection's return: the final closing
+// check must tear the connection down instead of leaving it running on a closed
+// client.
+func TestStartConnectionCloseRaceAfterHandshake(t *testing.T) {
+	t.Parallel()
+	client, transport, _, _ := newReconnectClient(t)
+
+	var onCloseCh chan<- error
+	transport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *url.URL, _ string, _ chan<- []byte, onClose chan<- error) error {
+			onCloseCh = onClose
+			return nil
+		})
+	transport.EXPECT().RequestHandshake().DoAndReturn(func() error {
+		// Close() lands while the handshake request is completing.
+		atomic.StoreUint32(&client.closing, 1)
+		return nil
+	})
+	transport.EXPECT().Stop().DoAndReturn(func() error {
+		onCloseCh <- nil
+		return nil
+	})
+
+	err := client.startConnection(context.Background())
+	assert.ErrorIs(t, err, errClientClosed)
+
+	select {
+	case <-client.supervisorDone:
+	default:
+		t.Fatal("supervisorDone was not closed by the teardown")
+	}
+	// The message loop was stopped via its stop signal.
+	client.transportMu.RLock()
+	assert.Nil(t, client.messagesStop)
+	client.transportMu.RUnlock()
+}
+
+// TestCloseAfterHandshakeErrorAttempt verifies that a Close() issued after a
+// failed attempt (e.g. on reconnect exhaustion) does not block draining the
+// already-consumed transportClosed channel and does not double-close the
+// messages channel that the failed attempt already closed.
+func TestCloseAfterHandshakeErrorAttempt(t *testing.T) {
+	t.Parallel()
+	client, transport, _, _ := newReconnectClient(t)
+	hsErr := errors.New("handshake failed")
+
+	var onCloseCh chan<- error
+	transport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ *url.URL, _ string, _ chan<- []byte, onClose chan<- error) error {
+			onCloseCh = onClose
+			return nil
+		})
+	transport.EXPECT().RequestHandshake().Return(hsErr)
+	var deliverOnce sync.Once
+	transport.EXPECT().Stop().DoAndReturn(func() error {
+		// The transport reports its loop exit exactly once; a second Stop()
+		// (from Close) must not send again — the attempt's cleanup has already
+		// drained and closed the channel.
+		deliverOnce.Do(func() {
+			if onCloseCh != nil {
+				onCloseCh <- nil
+			}
+		})
+		return nil
+	}).AnyTimes()
+
+	err := client.startConnection(context.Background())
+	require.ErrorIs(t, err, hsErr)
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- client.Close()
+	}()
+	select {
+	case err := <-closeDone:
+		assert.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked after a failed connection attempt")
+	}
+}
+
+// TestStartSupervisorSkippedWhenClosing ensures a handshake that completes
+// after Close() does not start a supervisor that would block forever on the
+// transportClosed channel Close() already drained.
+func TestStartSupervisorSkippedWhenClosing(t *testing.T) {
+	t.Parallel()
+	client, _, _, _ := newReconnectClient(t)
+	client.supervisorDone = make(chan struct{})
+
+	atomic.StoreUint32(&client.closing, 1)
+	client.startSupervisor()
+
+	assert.Equal(t, uint32(0), atomic.LoadUint32(&client.supervisorStarted),
+		"supervisor must not be started on a closing client")
+}
