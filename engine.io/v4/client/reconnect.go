@@ -37,7 +37,8 @@ func (c *Client) startSupervisor() {
 		// replaces c.supervisorDone with a fresh channel, so the supervisor must
 		// close the one it was started with, not the current field.
 		done := c.supervisorDone
-		closing := atomic.LoadUint32(&c.closing) == 1
+		closing := atomic.LoadUint32(&c.closing) == 1 ||
+			atomic.LoadUint32(&c.cycleAbandoned) == 1
 		if closed != nil && !closing {
 			atomic.StoreUint32(&c.supervisorStarted, 1)
 		}
@@ -46,8 +47,10 @@ func (c *Client) startSupervisor() {
 			return
 		}
 		if closing {
-			// Close() already ran: it drained transportClosed itself, so a
-			// supervisor started now would block forever on an empty channel.
+			// Close() already ran (or the reconnect loop abandoned this cycle):
+			// the teardown owner drains transportClosed itself, so a supervisor
+			// started now would compete for — or block forever on — that
+			// channel.
 			return
 		}
 		go c.supervise(closed, done)
@@ -204,8 +207,6 @@ func (c *Client) reconnectLoop(cause error) {
 func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 	c.transportMu.RLock()
 	wh := c.waitHandshake
-	closed := c.transportClosed
-	transport := c.transport
 	c.transportMu.RUnlock()
 
 	// nil channels block forever in a select, which is exactly the desired
@@ -219,18 +220,14 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 	timer := time.NewTimer(bound)
 	defer timer.Stop()
 
+	// Deliberately NOT selecting on transportClosed here: during a
+	// polling->websocket upgrade, transportUpgrade (running on the message
+	// loop goroutine) must consume the old transport's close notification from
+	// that very channel — stealing it here would leave the upgrade blocked. A
+	// transport that dies before the handshake is instead caught by the timer.
 	select {
 	case <-wh:
 		return true
-	case <-closed:
-		// The transport died before the handshake completed. No supervisor is
-		// watching this cycle yet (it only starts once the handshake is
-		// processed), so this loop owns the teardown: close the drained channel
-		// so a later Close() doesn't block on it, and stop the orphaned
-		// message loop.
-		close(closed)
-		c.stopMessageLoop()
-		return false
 	case <-ctxDone:
 		// Context cancellation winds the transports and the message loop down
 		// on its own; nothing to tear down here.
@@ -240,26 +237,42 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 		// so it drains transportClosed itself).
 		return false
 	case <-timer.C:
-		// The handshake did not complete in time: stop the half-open transport
-		// so the next retry starts clean.
-		if transport == nil {
-			c.stopMessageLoop()
-			return false
-		}
+	}
+
+	// The bound elapsed. Re-check the gate under the lock and abandon the
+	// cycle before touching the transport: transportUpgrade serialises its
+	// drain of transportClosed under transportMu and bails out once the cycle
+	// is abandoned, so after this section there is exactly one consumer (us or
+	// an already-started supervisor) for the close notification.
+	c.transportMu.Lock()
+	select {
+	case <-wh:
+		c.transportMu.Unlock()
+		return true
+	default:
+	}
+	atomic.StoreUint32(&c.cycleAbandoned, 1)
+	transport := c.transport
+	closed := c.transportClosed
+	c.transportMu.Unlock()
+
+	if transport != nil {
 		_ = transport.Stop()
 		select {
 		case <-closed:
+			// Single close notification consumed; close the channel so a later
+			// Close() doesn't block draining it.
 			close(closed)
 		case <-wh:
-			// The handshake completed at the very moment the bound elapsed and
-			// its supervisor now owns transportClosed; it will observe the
-			// Stop() above as a graceful close and exit. The transport is
-			// stopped either way, so still report failure and let the loop
+			// Photo-finish: the handshake completed while we were stopping the
+			// transport and its supervisor consumed the close notification (it
+			// observes the Stop() as a graceful close and exits). The transport
+			// is stopped either way, so still report failure and let the loop
 			// retry with fresh state.
 		}
-		c.stopMessageLoop()
-		return false
 	}
+	c.stopMessageLoop()
+	return false
 }
 
 // stopRequested reports whether the reconnect loop should abort because the

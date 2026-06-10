@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
+	mocks "github.com/maldikhan/go.socket.io/engine.io/v4/client/mocks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -257,15 +258,20 @@ func TestAwaitConnectionEstablished(t *testing.T) {
 
 	t.Run("transport dies before the handshake", func(t *testing.T) {
 		t.Parallel()
-		client, _, _, _ := newReconnectClient(t)
+		client, transport, _, _ := newReconnectClient(t)
 		client.transportMu.Lock()
 		client.waitHandshake = make(chan struct{}, 1)
 		client.transportClosed = make(chan error, 1)
+		// The dead transport's close notification is already queued; the wait
+		// must not steal it early (an upgrade drain could own it) — the death
+		// is detected via the bound, after which this loop owns the drain.
 		client.transportClosed <- errors.New("dropped")
 		closed := client.transportClosed
 		client.transportMu.Unlock()
 
-		assert.False(t, client.awaitConnectionEstablished(time.Second))
+		transport.EXPECT().Stop().Return(nil)
+
+		assert.False(t, client.awaitConnectionEstablished(10*time.Millisecond))
 		// The drained channel must be closed so a later Close() doesn't block.
 		select {
 		case _, ok := <-closed:
@@ -430,4 +436,82 @@ func TestReconnectLoopStopDuringAwait(t *testing.T) {
 
 	assert.Equal(t, int32(0), atomic.LoadInt32(&failed),
 		"a cancelled session must not be reported as reconnect_failed")
+}
+
+// TestTransportUpgradeBailsOnAbandonedCycle reproduces the review finding: a
+// reconnect attempt that timed out owns the transportClosed drain, so a
+// late-arriving OPEN packet must not let transportUpgrade stop/replace the
+// transport or compete for the close notification.
+func TestTransportUpgradeBailsOnAbandonedCycle(t *testing.T) {
+	t.Parallel()
+	client, _, _, _ := newReconnectClient(t)
+	atomic.StoreUint32(&client.cycleAbandoned, 1)
+
+	newTransport := mocks.NewMockTransport(gomock.NewController(t))
+
+	err := client.transportUpgrade(newTransport)
+	assert.ErrorIs(t, err, errClientClosed)
+
+	// The upgrade gate must be released so Send() callers don't block.
+	client.transportMu.RLock()
+	wu := client.waitUpgrade
+	client.transportMu.RUnlock()
+	select {
+	case <-wu:
+	default:
+		t.Fatal("waitUpgrade left open after an abandoned upgrade")
+	}
+}
+
+// TestStartSupervisorSkippedWhenCycleAbandoned mirrors the closing guard: a
+// handshake that completes after the reconnect loop abandoned the cycle must
+// not start a supervisor that would compete for transportClosed.
+func TestStartSupervisorSkippedWhenCycleAbandoned(t *testing.T) {
+	t.Parallel()
+	client, _, _, _ := newReconnectClient(t)
+	client.supervisorDone = make(chan struct{})
+	atomic.StoreUint32(&client.cycleAbandoned, 1)
+
+	client.startSupervisor()
+	assert.Equal(t, uint32(0), atomic.LoadUint32(&client.supervisorStarted),
+		"supervisor must not start on an abandoned cycle")
+}
+
+// TestAwaitConnectionEstablishedPhotoFinish covers the under-lock re-check of
+// the handshake gate: the test holds transportMu while the bound elapses, so
+// the wait commits to the timeout arm, then closes the gate before releasing
+// the lock — the re-check must observe the completed handshake and report
+// success instead of tearing the established session down.
+func TestAwaitConnectionEstablishedPhotoFinish(t *testing.T) {
+	t.Parallel()
+	client, _, _, _ := newReconnectClient(t)
+
+	wh := make(chan struct{})
+	client.transportMu.Lock()
+	client.waitHandshake = wh
+	client.transportClosed = make(chan error, 1)
+	client.transportMu.Unlock()
+
+	result := make(chan bool, 1)
+	go func() {
+		result <- client.awaitConnectionEstablished(200 * time.Millisecond)
+	}()
+
+	// Let the wait pass its entry snapshot and enter the select, then block its
+	// post-timeout lock acquisition while the bound elapses.
+	time.Sleep(50 * time.Millisecond)
+	client.transportMu.Lock()
+	// The bound elapses while we hold the lock, so the wait commits to the
+	// timeout arm and parks on transportMu; complete the handshake before
+	// releasing the lock so the under-lock re-check observes it.
+	time.Sleep(300 * time.Millisecond)
+	close(wh)
+	client.transportMu.Unlock()
+
+	select {
+	case ok := <-result:
+		assert.True(t, ok, "a handshake completed before the re-check must be reported as success")
+	case <-time.After(2 * time.Second):
+		t.Fatal("awaitConnectionEstablished did not return")
+	}
 }

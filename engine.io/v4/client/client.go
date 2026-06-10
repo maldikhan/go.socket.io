@@ -74,6 +74,12 @@ type Client struct {
 	// then closes supervisorDone), so Close() must wait on supervisorDone
 	// instead of competing for the single transportClosed value.
 	attemptInFlight uint32
+	// cycleAbandoned is set to 1 by awaitConnectionEstablished when a reconnect
+	// attempt's handshake does not complete within its bound: a late-arriving
+	// OPEN packet must then no longer upgrade the transport or start a
+	// supervisor, because the reconnect loop has already torn the cycle down
+	// and will retry. Reset to 0 by startConnection for every new cycle.
+	cycleAbandoned uint32
 
 	// closeCh is closed exactly once by Close() to wake any goroutine parked in
 	// the reconnect backoff wait, so Close() returns promptly instead of blocking
@@ -182,6 +188,7 @@ func (c *Client) startConnection(ctx context.Context) error {
 	c.superviseOnce = sync.Once{}
 	c.supervisorDone = make(chan struct{})
 	atomic.StoreUint32(&c.supervisorStarted, 0)
+	atomic.StoreUint32(&c.cycleAbandoned, 0)
 
 	// Reset the upgrade gate: a previous cycle may have left waitUpgrade closed
 	// and hadUpgrade fired. They are re-armed lazily by transportUpgrade(), but
@@ -360,6 +367,13 @@ func (c *Client) transportUpgrade(transport Transport) error {
 		})
 		c.transportMu.Unlock()
 		return err
+	}
+
+	// A reconnect attempt that timed out has already torn this cycle down (and
+	// owns the transportClosed drain); a late upgrade must not stop/replace the
+	// transport or compete for the close notification.
+	if atomic.LoadUint32(&c.cycleAbandoned) == 1 {
+		return failUpgrade(errClientClosed)
 	}
 
 	err := c.transport.Stop()
