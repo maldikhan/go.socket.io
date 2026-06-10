@@ -420,6 +420,62 @@ func TestClient_Connect_Timeout_UnblocksSend(t *testing.T) {
 	})
 }
 
+// TestClient_Connect_Timeout_HandshakeProtocolError verifies that a definitive
+// handshake failure (malformed OPEN packet, or one without a sid) releases the
+// handshake gate with the error recorded, so a timed Connect() reports the
+// protocol error immediately instead of waiting out the full connect timeout
+// and misreporting it as context.DeadlineExceeded.
+func TestClient_Connect_Timeout_HandshakeProtocolError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		openData []byte
+		wantErr  string
+	}{
+		{"malformed OPEN payload", []byte("not-json"), "invalid character"},
+		{"OPEN without sid", []byte(`{"pingInterval":25000}`), "handshake error: no sid"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			// The timeout is deliberately long: the test fails fast only if the
+			// protocol error releases the gate instead of the timer.
+			client, mockTransport, mockParser := newTimeoutTestClient(t, ctrl, 30*time.Second)
+
+			mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+			mockTransport.EXPECT().RequestHandshake().DoAndReturn(func() error {
+				go func() {
+					client.messages <- append([]byte{'0'}, tc.openData...)
+				}()
+				return nil
+			})
+			mockParser.EXPECT().Parse(gomock.Any()).DoAndReturn(func(data []byte) (*engineio_v4.Message, error) {
+				return &engineio_v4.Message{Type: engineio_v4.PacketOpen, Data: data[1:]}, nil
+			})
+			mockTransport.EXPECT().Stop().DoAndReturn(func() error {
+				client.transportClosed <- nil
+				return nil
+			})
+
+			start := time.Now()
+			err := client.Connect(context.Background())
+			require.Error(t, err, "a handshake protocol error must not be reported as success")
+			assert.ErrorContains(t, err, "connect failed")
+			assert.ErrorContains(t, err, tc.wantErr)
+			assert.NotErrorIs(t, err, context.DeadlineExceeded,
+				"a definitive handshake failure must not be misreported as a timeout")
+			assert.Less(t, time.Since(start), 10*time.Second,
+				"Connect must fail fast on a handshake protocol error, not wait out the timeout")
+		})
+	}
+}
+
 // TestClient_Connect_Timeout_CloseAborts verifies that a concurrent Close()
 // aborting a timed Connect() is reported as ErrConnectAborted — not
 // misclassified as context.DeadlineExceeded (the timer never fired) and not as

@@ -334,17 +334,34 @@ func (c *Client) transportUpgrade(transport Transport) error {
 	return err
 }
 
+// failHandshake records a definitive handshake failure (e.g. a malformed OPEN
+// packet) and releases the handshake gate, so a timed Connect() waiting on the
+// gate wakes immediately and reports the protocol error instead of paying the
+// full connect timeout, and parked Send() callers are unblocked. The error is
+// recorded BEFORE the gate is released so the waker is guaranteed to see it.
+func (c *Client) failHandshake(err error) error {
+	c.transportMu.Lock()
+	c.handshakeErr = err
+	c.transportMu.Unlock()
+	c.hadHandshake.Do(func() {
+		if c.waitHandshake != nil {
+			close(c.waitHandshake)
+		}
+	})
+	return err
+}
+
 func (c *Client) handleHandshake(data []byte) error {
 	c.log.Debugf("apply handshake: %s", c.payload(data))
 
 	handshakeResp := &engineio_v4.HandshakeResponse{}
 	err := json.Unmarshal(data, handshakeResp)
 	if err != nil {
-		return err
+		return c.failHandshake(err)
 	}
 
 	if handshakeResp.Sid == "" {
-		return fmt.Errorf("handshake error: no sid")
+		return c.failHandshake(fmt.Errorf("handshake error: no sid"))
 	}
 
 	// Upgrade transports
