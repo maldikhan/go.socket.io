@@ -419,3 +419,36 @@ func TestClient_Connect_Timeout_UnblocksSend(t *testing.T) {
 		}
 	})
 }
+
+// TestClient_Connect_Timeout_CloseAborts verifies that a concurrent Close()
+// aborting a timed Connect() is reported as ErrConnectAborted — not
+// misclassified as context.DeadlineExceeded (the timer never fired) and not as
+// a caller cancellation (the session context is still live).
+func TestClient_Connect_Timeout_CloseAborts(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	client, mockTransport, _ := newTimeoutTestClient(t, ctrl, 30*time.Second)
+
+	mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+	// The handshake request succeeds but no OPEN packet ever arrives, so
+	// Connect parks waiting on the handshake gate until Close() aborts it.
+	mockTransport.EXPECT().RequestHandshake().Return(nil)
+	mockTransport.EXPECT().Stop().Do(func() {
+		client.transportClosed <- nil
+	})
+
+	go func() {
+		// Give Connect a moment to reach the gate wait, then close the client.
+		time.Sleep(50 * time.Millisecond)
+		_ = client.Close()
+	}()
+
+	start := time.Now()
+	err := client.Connect(context.Background())
+	assert.ErrorIs(t, err, ErrConnectAborted)
+	assert.NotErrorIs(t, err, context.DeadlineExceeded,
+		"a concurrent Close must not be misreported as a timeout")
+	assert.Less(t, time.Since(start), 10*time.Second, "Close must abort Connect promptly")
+}

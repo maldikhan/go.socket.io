@@ -304,21 +304,25 @@ func TestPollingLoop(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		errExpected := errors.New("expected error")
-		pingCalled := make(chan struct{})
+		// errLogged is closed once the loop has logged the poll error. Triggering
+		// Stop() off this (rather than off the Do call) makes the test
+		// deterministic: Stop() runs only after pollingLoop has already passed its
+		// stopped-check and logged, so the "poll error" Errorf is always observed.
+		// Stopping earlier raced the loop's stopped-check and could make it exit
+		// before logging, flaking the MinTimes(1) expectation.
+		errLogged := make(chan struct{})
 
 		mockLogger := mocks.NewMockLogger(ctrl)
 		mockHttpClient := mocks.NewMockHttpClient(ctrl)
 		mockLogger.EXPECT().Debugf("run polling").MinTimes(1)
 		mockLogger.EXPECT().Debugf("stop polling").MinTimes(1)
-		mockLogger.EXPECT().Errorf("poll error: %s", errExpected).MinTimes(1)
-		mockHttpClient.EXPECT().Do(gomock.Any()).DoAndReturn(func(_ *http.Request) (*http.Response, error) {
-			close(pingCalled)
-			return nil, errExpected
-		})
+		mockLogger.EXPECT().Errorf("poll error: %s", errExpected).
+			Do(func(string, ...interface{}) { close(errLogged) }).Times(1)
+		mockHttpClient.EXPECT().Do(gomock.Any()).Return(nil, errExpected).Times(1)
 
 		onClose := make(chan error, 1)
 		client := &Transport{
@@ -336,9 +340,10 @@ func TestPollingLoop(t *testing.T) {
 
 		go func() {
 			select {
-			case <-pingCalled:
-			case <-time.After(100 * time.Millisecond):
-				assert.Fail(t, "expected ping to be called")
+			case <-errLogged:
+			case <-time.After(2 * time.Second):
+				assert.Fail(t, "expected poll error to be logged")
+				return
 			}
 
 			assert.NoError(t, client.Stop())
@@ -353,14 +358,14 @@ func TestPollingLoop(t *testing.T) {
 
 		select {
 		case <-exitChan:
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(2 * time.Second):
 			assert.Fail(t, "expected pollingLoop to exit")
 		}
 
 		select {
 		case err := <-onClose:
 			assert.NoError(t, err)
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(2 * time.Second):
 			assert.Fail(t, "expected pollingLoop to exit and emit onClose")
 		}
 

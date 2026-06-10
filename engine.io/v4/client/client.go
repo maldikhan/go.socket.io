@@ -7,10 +7,16 @@ import (
 	"fmt"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 )
+
+// ErrConnectAborted is returned by Connect (with a connect timeout
+// configured) when a concurrent Close() aborts the connection phase before
+// the timeout elapses and before the caller's context is cancelled.
+var ErrConnectAborted = errors.New("engine.io: connect aborted: client closed")
 
 type Client struct {
 	url                 *url.URL
@@ -95,20 +101,33 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.connectCancel = connCancel
 	c.transportMu.Unlock()
 
-	timer := time.AfterFunc(c.connectTimeout, connCancel)
+	// timerFired distinguishes the timeout timer cancelling connCtx from a
+	// concurrent Close() invoking the same cancel func: both leave
+	// connCtx.Err() non-nil with the caller's ctx still live, but only the
+	// former is a timeout.
+	var timerFired atomic.Bool
+	timer := time.AfterFunc(c.connectTimeout, func() {
+		timerFired.Store(true)
+		connCancel()
+	})
 
-	timeoutErr := func() error {
+	// connectErr names the actual cause of an aborted connect: the caller's
+	// context, the timeout timer, or (when it is neither) a concurrent Close().
+	connectErr := func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		return fmt.Errorf("engine.io: connect timeout after %s: %w", c.connectTimeout, context.DeadlineExceeded)
+		if timerFired.Load() {
+			return fmt.Errorf("engine.io: connect timeout after %s: %w", c.connectTimeout, context.DeadlineExceeded)
+		}
+		return ErrConnectAborted
 	}
 
 	err := c.connect(connCtx)
 	if err != nil {
-		// Check the contexts before releasing connCtx: connCancel() below sets
+		// Check connCtx before releasing it: connCancel() below sets
 		// connCtx.Err() unconditionally, which would mask the real cause.
-		timedOut := connCtx.Err() != nil && ctx.Err() == nil
+		aborted := connCtx.Err() != nil
 		timer.Stop()
 		connCancel()
 		// connect() already stopped the transport and joined the message loop
@@ -118,9 +137,10 @@ func (c *Client) Connect(ctx context.Context) error {
 		// nil transport and fails fast instead of blocking forever. The
 		// transport needs no further Stop() here — connect() owns that.
 		c.markClosed()
-		if timedOut {
-			// The failure was caused by the timeout firing, not by the caller.
-			return timeoutErr()
+		if aborted {
+			// The connect context was cancelled — by the caller, the timeout
+			// timer or a concurrent Close(); name the actual cause.
+			return connectErr()
 		}
 		return err
 	}
@@ -148,18 +168,27 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 		}
 		timer.Stop()
-		if connCtx.Err() == nil {
+		// The gates are also released by Close() (so parked Send()s fail fast),
+		// so waking here does not by itself mean the handshake succeeded: a
+		// concurrent Close() must not let Connect report success on a closed
+		// client. Only return success when the client is still live.
+		c.transportMu.RLock()
+		closed := c.transport == nil
+		c.transportMu.RUnlock()
+		if connCtx.Err() == nil && !closed {
 			return nil
 		}
-		// The timeout fired while the handshake was completing: the transports
-		// are already shutting down, so report the failure to the caller.
+		// The timeout fired (or the client was closed) while the handshake was
+		// completing: the transports are already shutting down, so report the
+		// failure to the caller.
 	case <-connCtx.Done():
 		timer.Stop()
 	}
 
-	// Timed out (or the caller cancelled ctx): tear down whatever was started.
+	// The connection phase was aborted (timeout, caller cancellation or a
+	// concurrent Close): tear down whatever was started and name the cause.
 	_ = c.Close()
-	return timeoutErr()
+	return connectErr()
 }
 
 // connect performs the connection sequence: it runs the transport, starts the
