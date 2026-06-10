@@ -230,3 +230,22 @@ func TestStartSupervisorSkippedWhenClosing(t *testing.T) {
 	assert.Equal(t, uint32(0), atomic.LoadUint32(&client.supervisorStarted),
 		"supervisor must not be started on a closing client")
 }
+
+// TestStopMessageLoopAlreadyClosedStop covers the defensive branch where the
+// stop channel observed by stopMessageLoop was already closed: the call must
+// not double-close it and must still wait for the loop's done channel.
+func TestStopMessageLoopAlreadyClosedStop(t *testing.T) {
+	t.Parallel()
+	client, _, _, _ := newReconnectClient(t)
+
+	stop := make(chan struct{})
+	close(stop)
+	done := make(chan struct{})
+	close(done)
+	client.transportMu.Lock()
+	client.messagesStop = stop
+	client.messagesDone = done
+	client.transportMu.Unlock()
+
+	assert.NotPanics(t, func() { client.stopMessageLoop() })
+}
