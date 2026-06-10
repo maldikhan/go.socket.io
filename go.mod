@@ -3,7 +3,6 @@ module github.com/maldikhan/go.socket.io
 go 1.21
 
 require (
-	github.com/coder/websocket v1.8.13
 	github.com/golang/mock v1.6.0
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/net v0.33.0

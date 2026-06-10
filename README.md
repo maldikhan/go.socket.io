@@ -353,15 +353,18 @@ By default the WebSocket transport uses a zero-dependency backend built on
 permessage-deflate compression, a proper RFC 6455 close handshake and
 configurable read limits.
 
-If you need those, opt in to the backend built on
+If you need those, opt in to the external backend built on
 [github.com/coder/websocket](https://github.com/coder/websocket) (the actively
-maintained continuation of `nhooyr.io/websocket`):
+maintained continuation of `nhooyr.io/websocket`). It lives in a separate
+module — [go.socket.io-websocket.coder](https://github.com/maldikhan/go.socket.io-websocket.coder) —
+so the main client stays dependency-free (same packaging as the
+[jsoniter parser](https://github.com/maldikhan/go.socket.io-parser.jsoniter)):
 
 ```go
 import (
     engineio "github.com/maldikhan/go.socket.io/engine.io/v4/client"
     engineio_ws "github.com/maldikhan/go.socket.io/engine.io/v4/client/transport/websocket"
-    ws_coder "github.com/maldikhan/go.socket.io/websocket/coder"
+    ws_coder "github.com/maldikhan/go.socket.io-websocket.coder"
 )
 
 wsConn, err := ws_coder.New(
@@ -392,8 +395,7 @@ client, err := socketio.NewClient(
 )
 ```
 
-The default backend stays dependency-free; the coder backend is only linked
-into your binary when you import `websocket/coder`.
+The backend is only linked into your binary when you import its module.
 
 ## Concurrency Model
 
