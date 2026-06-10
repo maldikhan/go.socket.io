@@ -90,9 +90,21 @@ func NewClient(options ...ClientOption) (*Client, error) {
 		client.emitReserved("reconnect")
 	})
 	client.engineio.On("reconnecting", func(_ []byte) {
+		// Re-arm the namespace CONNECT gate before any reconnect attempt is
+		// made: the engine-level "connect" hook above runs asynchronously after
+		// a successful attempt and re-sends the socket.io CONNECT, and emits
+		// (including ones fired from a "reconnect" handler) must block until
+		// the server acknowledges it (handleConnect re-opens the gate).
+		// "reconnecting" fires before a new connection can exist, so the reset
+		// cannot race with that ack.
+		client.defaultNs.resetConnectionGate()
 		client.emitReserved("reconnecting")
 	})
 	client.engineio.On("reconnect_failed", func(_ []byte) {
+		// All attempts failed and the engine client closes: release pending
+		// emitters so they fail fast at the transport instead of hanging on a
+		// gate no CONNECT ack will ever close.
+		client.defaultNs.openConnectionGate()
 		client.emitReserved("reconnect_failed")
 	})
 

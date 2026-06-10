@@ -47,8 +47,53 @@ type namespace struct {
 	handlers    map[string][]func([]interface{})
 	anyHandlers []func(string, []interface{})
 
+	// waitConnected gates Emit until the server acknowledged the namespace
+	// CONNECT: open (blocking) while a CONNECT is outstanding, closed once the
+	// ack arrived. It is re-armed by resetConnectionGate when a reconnect cycle
+	// starts, so post-reconnect emits wait for the re-sent CONNECT to be
+	// acknowledged. Guarded by mu.
 	waitConnected chan struct{}
-	hadConnected  sync.Once
+}
+
+// connectionGate returns the current waitConnected channel (which may be nil
+// for namespaces built without the constructor in tests).
+func (n *namespace) connectionGate() chan struct{} {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.waitConnected
+}
+
+// resetConnectionGate re-arms waitConnected before a reconnect attempt so Emit
+// blocks until the server acknowledges the re-sent CONNECT. Only a closed gate
+// is replaced: replacing an open one would orphan emitters already waiting on
+// it (their CONNECT ack is still the next one to arrive).
+func (n *namespace) resetConnectionGate() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.waitConnected == nil {
+		n.waitConnected = make(chan struct{})
+		return
+	}
+	select {
+	case <-n.waitConnected:
+		n.waitConnected = make(chan struct{})
+	default:
+	}
+}
+
+// openConnectionGate marks the namespace connected, releasing every emitter
+// blocked on the gate. Closing is idempotent so duplicate CONNECT acks are safe.
+func (n *namespace) openConnectionGate() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.waitConnected == nil {
+		return
+	}
+	select {
+	case <-n.waitConnected:
+	default:
+		close(n.waitConnected)
+	}
 }
 
 // SetHandshakeData stores a shallow copy of the provided map as the handshake
@@ -104,7 +149,6 @@ func (c *Client) namespace(name string) *namespace {
 		name:          name,
 		handlers:      make(map[string][]func([]interface{})),
 		waitConnected: make(chan struct{}),
-		hadConnected:  sync.Once{},
 	}
 	c.namespaces[name] = ns
 	return ns

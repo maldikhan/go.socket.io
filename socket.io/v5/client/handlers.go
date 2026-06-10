@@ -147,11 +147,7 @@ func (c *Client) handleDisconnect(ns *namespace, payload interface{}) {
 
 func (c *Client) handleConnect(ns *namespace, payload interface{}) {
 	c.logger.Infof("Connected to namespace: %s", ns.name)
-	ns.hadConnected.Do(func() {
-		if ns.waitConnected != nil {
-			close(ns.waitConnected)
-		}
-	})
+	ns.openConnectionGate()
 
 	ns.mu.RLock()
 	handlers, ok := ns.handlers["connect"]

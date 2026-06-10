@@ -181,6 +181,121 @@ func TestReconnectingAndFailedEmit(t *testing.T) {
 	}
 }
 
+// TestReconnectingReArmsConnectGate is the regression test for emits racing the
+// re-sent CONNECT after a reconnect: "reconnecting" must re-arm the namespace
+// gate so an Emit (e.g. from a user's "reconnect" handler) blocks until the
+// server acknowledges the new CONNECT, instead of sailing through on the gate
+// closed by the FIRST connection's ack.
+func TestReconnectingReArmsConnectGate(t *testing.T) {
+	client, handlers, mockEngine, mockParser := captureEngineHandlers(t)
+	mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte("2"), nil).AnyTimes()
+	mockEngine.EXPECT().Send(gomock.Any()).Return(nil).AnyTimes()
+
+	// First connection completed: the server's CONNECT ack closed the gate.
+	client.handleConnect(client.defaultNs, nil)
+
+	// Connection drops, reconnect cycle starts.
+	handlers["reconnecting"](nil)
+
+	// An emit issued now (the engine may already have fired "reconnect") must
+	// block until the re-sent CONNECT is acknowledged.
+	emitDone := make(chan error, 1)
+	go func() { emitDone <- client.Emit("hello") }()
+
+	select {
+	case <-emitDone:
+		t.Fatal("Emit must block until the re-sent CONNECT is acknowledged")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The server acknowledges the re-sent CONNECT: the emit proceeds.
+	client.handleConnect(client.defaultNs, nil)
+	select {
+	case err := <-emitDone:
+		assert.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Emit must proceed once the CONNECT ack arrives")
+	}
+}
+
+// TestReconnectFailedReleasesEmitters verifies that when every reconnect
+// attempt failed (the engine client closes), pending emitters are released
+// instead of blocking forever on a gate no CONNECT ack will ever close.
+func TestReconnectFailedReleasesEmitters(t *testing.T) {
+	client, handlers, mockEngine, mockParser := captureEngineHandlers(t)
+	mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte("2"), nil).AnyTimes()
+	mockEngine.EXPECT().Send(gomock.Any()).Return(nil).AnyTimes()
+
+	client.handleConnect(client.defaultNs, nil)
+	handlers["reconnecting"](nil)
+
+	emitDone := make(chan error, 1)
+	go func() { emitDone <- client.Emit("hello") }()
+	select {
+	case <-emitDone:
+		t.Fatal("Emit must block while the reconnect is in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	handlers["reconnect_failed"](nil)
+	select {
+	case <-emitDone:
+	case <-time.After(time.Second):
+		t.Fatal("reconnect_failed must release pending emitters")
+	}
+}
+
+// TestConnectionGateHelpers covers the namespace gate primitives directly:
+// resetConnectionGate must create a gate when none exists, replace a closed
+// gate and leave an open gate (with potential waiters) untouched;
+// openConnectionGate must tolerate nil gates and duplicate CONNECT acks.
+func TestConnectionGateHelpers(t *testing.T) {
+	t.Run("reset creates gate when nil", func(t *testing.T) {
+		ns := &namespace{}
+		ns.resetConnectionGate()
+		assert.NotNil(t, ns.connectionGate())
+	})
+
+	t.Run("reset keeps an open gate", func(t *testing.T) {
+		ns := &namespace{waitConnected: make(chan struct{})}
+		before := ns.connectionGate()
+		ns.resetConnectionGate()
+		assert.Equal(t, before, ns.connectionGate(),
+			"an open gate has waiters bound to it and must not be replaced")
+	})
+
+	t.Run("reset replaces a closed gate", func(t *testing.T) {
+		ns := &namespace{waitConnected: make(chan struct{})}
+		ns.openConnectionGate()
+		before := ns.connectionGate()
+		ns.resetConnectionGate()
+		after := ns.connectionGate()
+		assert.NotEqual(t, before, after)
+		select {
+		case <-after:
+			t.Fatal("the re-armed gate must be open (blocking)")
+		default:
+		}
+	})
+
+	t.Run("open tolerates nil gate", func(t *testing.T) {
+		ns := &namespace{}
+		ns.openConnectionGate()
+		assert.Nil(t, ns.connectionGate())
+	})
+
+	t.Run("open is idempotent", func(t *testing.T) {
+		ns := &namespace{waitConnected: make(chan struct{})}
+		ns.openConnectionGate()
+		ns.openConnectionGate() // duplicate CONNECT ack must not panic
+		select {
+		case <-ns.connectionGate():
+		default:
+			t.Fatal("gate must be closed after openConnectionGate")
+		}
+	})
+}
+
 // TestEmitReservedNoHandlers exercises emitReserved when there are no handlers
 // registered for the event and when the default namespace is nil (both no-ops).
 func TestEmitReservedNoHandlers(t *testing.T) {
