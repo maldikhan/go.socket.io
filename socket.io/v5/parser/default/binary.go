@@ -602,6 +602,19 @@ func (p *SocketIOV5DefaultParser) SerializeBinary(msg *socketio_v5.Message) ([]b
 			Payloads: placeholders,
 		},
 	}
+	if count == 0 {
+		// HasBinary saw a []byte, but no placeholder survived into the
+		// marshaled payloads (e.g. the only buffer sat in a `json:"-"` field
+		// or was dropped by omitempty). The wire form carries no binary, so
+		// emit the plain EVENT/ACK packet instead of a 0-attachment binary
+		// one — peers should not be asked to reconstruct an empty set.
+		if binaryType == socketio_v5.PacketBinaryEvent {
+			headerMsg.Type = socketio_v5.PacketEvent
+		} else {
+			headerMsg.Type = socketio_v5.PacketAck
+		}
+		headerMsg.BinaryAttachments = nil
+	}
 
 	header, err := p.serializeHeader(headerMsg)
 	if err != nil {

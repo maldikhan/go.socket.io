@@ -803,3 +803,45 @@ func TestParser_ParseBinaryAttachmentCount(t *testing.T) {
 		})
 	}
 }
+
+// TestParser_SerializeBinary_NoSurvivingPlaceholders verifies the fallback for
+// payloads where HasBinary saw a []byte but encoding/json drops it (json:"-"):
+// no attachment survives, so the packet must go out as a plain EVENT/ACK
+// instead of a 0-attachment binary packet.
+func TestParser_SerializeBinary_NoSurvivingPlaceholders(t *testing.T) {
+	t.Parallel()
+	p := newBinaryParser()
+
+	type hidden struct {
+		Secret []byte `json:"-"`
+		Name   string `json:"name"`
+	}
+
+	t.Run("event falls back to plain EVENT", func(t *testing.T) {
+		header, attachments, err := p.SerializeBinary(&socketio_v5.Message{
+			Type: socketio_v5.PacketEvent,
+			NS:   "/",
+			Event: &socketio_v5.Event{
+				Name:     "stealth",
+				Payloads: []interface{}{hidden{Secret: []byte{1, 2}, Name: "x"}},
+			},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, attachments)
+		assert.Equal(t, []byte(`2["stealth",{"name":"x"}]`), header)
+	})
+
+	t.Run("ack falls back to plain ACK", func(t *testing.T) {
+		header, attachments, err := p.SerializeBinary(&socketio_v5.Message{
+			Type:  socketio_v5.PacketAck,
+			NS:    "/",
+			AckId: intPtr(3),
+			Event: &socketio_v5.Event{
+				Payloads: []interface{}{hidden{Secret: []byte{1}, Name: "y"}},
+			},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, attachments)
+		assert.Equal(t, []byte(`33[{"name":"y"}]`), header)
+	})
+}
