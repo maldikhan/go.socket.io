@@ -112,8 +112,13 @@ func (c *Client) Connect(ctx context.Context) error {
 	// concurrent Close() invoking the same cancel func: both leave
 	// connCtx.Err() non-nil with the caller's ctx still live, but only the
 	// former is a timeout.
+	// timerDone is closed when the timeout callback has finished running, so
+	// the success path can synchronize with a callback that Stop() failed to
+	// prevent (Stop() does not wait for an in-flight AfterFunc to complete).
 	var timerFired atomic.Bool
+	timerDone := make(chan struct{})
 	timer := time.AfterFunc(c.connectTimeout, func() {
+		defer close(timerDone)
 		timerFired.Store(true)
 		connCancel()
 	})
@@ -174,7 +179,14 @@ func (c *Client) Connect(ctx context.Context) error {
 			case <-connCtx.Done():
 			}
 		}
-		timer.Stop()
+		if !timer.Stop() {
+			// The timeout callback already started in its own goroutine; wait
+			// for it to finish before judging success. Otherwise Connect could
+			// observe connCtx still live, return nil, and the in-flight
+			// callback would then cancel the context now serving the
+			// established session, tearing it down at the timeout boundary.
+			<-timerDone
+		}
 		// The gates are also released by Close() (so parked Send()s fail fast)
 		// and by a failed transport upgrade, so waking here does not by itself
 		// mean the handshake succeeded: a concurrent Close() or an upgrade
