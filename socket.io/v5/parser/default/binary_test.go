@@ -209,6 +209,40 @@ func TestParser_HasBinary(t *testing.T) {
 			}},
 			want: false,
 		},
+		{
+			// A nil byte slice is a nullable JSON value (encoding/json renders it
+			// as null), not an empty buffer — it must stay on the text path.
+			name:  "nil byte slice is not binary",
+			event: &socketio_v5.Event{Name: "ev", Payloads: []interface{}{[]byte(nil)}},
+			want:  false,
+		},
+		{
+			name:  "empty non-nil byte slice is binary",
+			event: &socketio_v5.Event{Name: "ev", Payloads: []interface{}{[]byte{}}},
+			want:  true,
+		},
+		{
+			name: "nil byte slice nested in map is not binary",
+			event: &socketio_v5.Event{Name: "ev", Payloads: []interface{}{
+				map[string]interface{}{"file": []byte(nil)},
+			}},
+			want: false,
+		},
+		{
+			// Exercises the reflect path: a nil []byte struct field is null.
+			name: "nil byte slice struct field is not binary",
+			event: &socketio_v5.Event{Name: "ev", Payloads: []interface{}{
+				struct{ File []byte }{File: nil},
+			}},
+			want: false,
+		},
+		{
+			name: "empty non-nil byte slice struct field is binary",
+			event: &socketio_v5.Event{Name: "ev", Payloads: []interface{}{
+				struct{ File []byte }{File: []byte{}},
+			}},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -289,6 +323,40 @@ func TestParser_SerializeBinary(t *testing.T) {
 		assert.Equal(t, []byte(`61-/admin,7[{"_placeholder":true,"num":0}]`), header)
 		require.Len(t, attachments, 1)
 		assert.Equal(t, []byte{0xFF}, attachments[0])
+	})
+
+	t.Run("nil byte slice stays null next to real binary", func(t *testing.T) {
+		header, attachments, err := p.SerializeBinary(&socketio_v5.Message{
+			Type: socketio_v5.PacketEvent,
+			NS:   "/",
+			Event: &socketio_v5.Event{
+				Name: "nullable",
+				Payloads: []interface{}{
+					[]byte(nil),
+					map[string]interface{}{"file": []byte(nil), "blob": []byte("data")},
+				},
+			},
+		})
+		require.NoError(t, err)
+		// Only the non-nil slice is lifted; the nil ones are JSON null.
+		assert.Equal(t, []byte(`51-["nullable",null,{"blob":{"_placeholder":true,"num":0},"file":null}]`), header)
+		require.Len(t, attachments, 1)
+		assert.Equal(t, []byte("data"), attachments[0])
+	})
+
+	t.Run("empty non-nil byte slice becomes empty attachment", func(t *testing.T) {
+		header, attachments, err := p.SerializeBinary(&socketio_v5.Message{
+			Type: socketio_v5.PacketEvent,
+			NS:   "/",
+			Event: &socketio_v5.Event{
+				Name:     "emptybuf",
+				Payloads: []interface{}{[]byte{}},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []byte(`51-["emptybuf",{"_placeholder":true,"num":0}]`), header)
+		require.Len(t, attachments, 1)
+		assert.Empty(t, attachments[0])
 	})
 
 	t.Run("nil message", func(t *testing.T) {

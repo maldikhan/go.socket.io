@@ -194,7 +194,11 @@ func valueHasBinaryDepth(value interface{}, depth int) bool {
 	case nil:
 		return false
 	case []byte:
-		return true
+		// A nil byte slice is rendered by encoding/json as JSON null — it is a
+		// nullable value, not an empty buffer, so it must stay on the text path
+		// (matching the JS client, where null is not binary). An empty non-nil
+		// slice IS binary: it becomes a zero-length attachment.
+		return v != nil
 	case map[string]interface{}:
 		for _, item := range v {
 			if valueHasBinaryDepth(item, depth-1) {
@@ -239,9 +243,12 @@ func reflectHasBinary(rv reflect.Value, depth int) bool {
 	case reflect.Slice:
 		// []byte is the binary leaf; anything else is a slice to descend into.
 		// (json.RawMessage and other marshaler-owned byte slices were already
-		// excluded by the implementsMarshaler check above.)
+		// excluded by the implementsMarshaler check above.) A nil byte slice is
+		// NOT binary: encoding/json renders it as null, so it stays a nullable
+		// JSON value instead of becoming an empty attachment. transformBinary
+		// relies on this — it never lifts a subtree this function rejects.
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
-			return true
+			return !rv.IsNil()
 		}
 		for i := 0; i < rv.Len(); i++ {
 			if reflectHasBinary(rv.Index(i), depth-1) {
