@@ -111,6 +111,13 @@ func (c *Client) Connect(ctx context.Context) error {
 		timedOut := connCtx.Err() != nil && ctx.Err() == nil
 		timer.Stop()
 		connCancel()
+		// connect() already stopped the transport and joined the message loop
+		// on its error paths, but it leaves the handshake gate it published
+		// open and the transport field set. Mark the client closed so a
+		// concurrent or subsequent Send() wakes from the gate, observes the
+		// nil transport and fails fast instead of blocking forever. The
+		// transport needs no further Stop() here — connect() owns that.
+		c.markClosed()
 		if timedOut {
 			// The failure was caused by the timeout firing, not by the caller.
 			return timeoutErr()
@@ -476,20 +483,23 @@ func (c *Client) On(event string, handler func([]byte)) {
 	}
 }
 
-func (c *Client) Close() error {
+// markClosed makes the client observably closed for Send() callers: it nils
+// the transport and releases the handshake/upgrade gates under transportMu, so
+// a Send() parked on a gate that will never complete wakes up, sees the nil
+// transport and fails fast with "client is closed". It returns the previous
+// transport (nil when already closed) and the pending connect-cancel func so
+// the caller can finish the teardown it owns.
+func (c *Client) markClosed() (Transport, context.CancelFunc) {
 	// Write-lock to prevent new Send() calls from acquiring the transport
 	// while we are tearing it down. Setting transport to nil ensures that
-	// any Send() arriving after Close releases the lock will see nil and
-	// fail fast instead of writing on a stopped transport.
+	// any Send() arriving after the lock is released will see nil and fail
+	// fast instead of writing on a stopped transport.
 	c.transportMu.Lock()
+	defer c.transportMu.Unlock()
 	t := c.transport
 	c.transport = nil
 	connectCancel := c.connectCancel
 	c.connectCancel = nil
-	// Release the connection gates so that a Send() waiting for a handshake
-	// or upgrade that will never complete (e.g. after a connect timeout
-	// teardown) wakes up, observes the nil transport and fails fast with
-	// "client is closed" instead of blocking forever.
 	c.hadHandshake.Do(func() {
 		if c.waitHandshake != nil {
 			close(c.waitHandshake)
@@ -500,7 +510,11 @@ func (c *Client) Close() error {
 			close(c.waitUpgrade)
 		}
 	})
-	c.transportMu.Unlock()
+	return t, connectCancel
+}
+
+func (c *Client) Close() error {
+	t, connectCancel := c.markClosed()
 
 	// Release the connection context created by Connect() (when a connect
 	// timeout is configured) so it does not stay parked on the parent context.

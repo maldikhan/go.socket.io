@@ -167,6 +167,20 @@ func TestClient_Connect_Timeout(t *testing.T) {
 
 		err := client.Connect(context.Background())
 		assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+		// The failed-connect teardown must leave the client observably closed:
+		// connect() published the handshake gate before RequestHandshake
+		// failed, so the gate has to be released and the transport nilled —
+		// otherwise Send() would park forever on a handshake that will never
+		// complete.
+		sendErr := make(chan error, 1)
+		go func() { sendErr <- client.Send([]byte("x")) }()
+		select {
+		case err := <-sendErr:
+			assert.EqualError(t, err, "client is closed")
+		case <-time.After(2 * time.Second):
+			t.Fatal("Send must fail fast after a failed Connect, not block")
+		}
 	})
 
 	t.Run("transport run error is passed through", func(t *testing.T) {
