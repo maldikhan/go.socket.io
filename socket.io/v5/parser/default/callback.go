@@ -5,6 +5,8 @@ import (
 	"reflect"
 )
 
+var rawMessageType = reflect.TypeOf(json.RawMessage{})
+
 func (p *SocketIOV5DefaultParser) WrapCallback(callback interface{}) func(in []interface{}) {
 
 	if p.payloadParser != nil {
@@ -54,7 +56,13 @@ func (p *SocketIOV5DefaultParser) WrapCallback(callback interface{}) func(in []i
 					continue
 				}
 				argValueOf := reflect.ValueOf(in[i])
-				if argValueOf.IsValid() && argValueOf.Type().AssignableTo(argType) {
+				// json.RawMessage parameters must always hold valid JSON, but a
+				// reconstructed binary attachment is a plain []byte of arbitrary
+				// bytes — assignable to RawMessage, yet not JSON. Skip the direct
+				// assignment for RawMessage targets so the value takes the
+				// marshal round-trip below, which encodes the bytes as a base64
+				// JSON string (the same representation typed []byte fields see).
+				if argValueOf.IsValid() && argValueOf.Type().AssignableTo(argType) && argType != rawMessageType {
 					args[i] = argValueOf
 					continue
 				}

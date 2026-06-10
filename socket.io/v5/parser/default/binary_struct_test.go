@@ -611,6 +611,31 @@ func TestWrapCallback_UnconvertibleValueSkipped(t *testing.T) {
 	assert.False(t, called)
 }
 
+// A reconstructed binary []byte must NOT be passed to a json.RawMessage
+// handler as-is (arbitrary bytes are not JSON, even though []byte is
+// assignable to RawMessage). It must arrive as the base64 JSON string the
+// equivalent non-binary payload would have, keeping the RawMessage
+// always-valid-JSON invariant.
+func TestWrapCallback_RawMessageHandlerGetsValidJSONForBinary(t *testing.T) {
+	t.Parallel()
+	parser := NewParser(WithLogger(logger))
+
+	original := []byte{0x00, 0xff, 0x10, 0x7f} // deliberately not valid JSON
+
+	var got json.RawMessage
+	cb := func(v json.RawMessage) { got = v }
+	wrapped := parser.WrapCallback(cb)
+	require.NotNil(t, wrapped)
+
+	wrapped([]interface{}{original})
+
+	require.NotNil(t, got)
+	assert.True(t, json.Valid(got), "RawMessage handler must receive valid JSON, got %q", got)
+	var roundTripped []byte
+	require.NoError(t, json.Unmarshal(got, &roundTripped))
+	assert.True(t, bytes.Equal(original, roundTripped), "base64 round-trip must reproduce the original bytes")
+}
+
 // json.RawMessage path is unchanged: ordinary JSON still unmarshals into a
 // struct handler.
 func TestWrapCallback_RawMessageStructStillWorks(t *testing.T) {
