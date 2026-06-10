@@ -52,6 +52,31 @@ func TestParser_WrapCallback_Binary(t *testing.T) {
 		assert.False(t, called, "binary payload must not bind to a string parameter")
 	})
 
+	t.Run("byte payload binds to defined byte-slice type", func(t *testing.T) {
+		// A defined type with a plain []byte underlying type is assignable
+		// directly (fast path).
+		type Blob []byte
+		var got Blob
+		cb := p.WrapCallback(func(b Blob) { got = b })
+		require.NotNil(t, cb)
+		cb([]interface{}{[]byte{0xA, 0xB}})
+		assert.Equal(t, Blob{0xA, 0xB}, got)
+	})
+
+	t.Run("byte payload binds to uint8-alias slice type", func(t *testing.T) {
+		// A slice of a DEFINED uint8 element is neither assignable nor
+		// convertible from []byte, but its element kind is Uint8, so the
+		// JSON round-trip (base64) decodes it — exactly as it does when the
+		// same payload arrives as a base64 JSON string.
+		type octet uint8
+		type octetBlob []octet
+		var got octetBlob
+		cb := p.WrapCallback(func(b octetBlob) { got = b })
+		require.NotNil(t, cb)
+		cb([]interface{}{[]byte{0x1, 0x2, 0x3}})
+		assert.Equal(t, octetBlob{0x1, 0x2, 0x3}, got)
+	})
+
 	t.Run("malformed json raw message is rejected", func(t *testing.T) {
 		called := false
 		cb := p.WrapCallback(func(n int) { called = true })

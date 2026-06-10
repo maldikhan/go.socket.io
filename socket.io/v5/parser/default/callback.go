@@ -60,13 +60,19 @@ func (p *SocketIOV5DefaultParser) WrapCallback(callback interface{}) func(in []i
 				}
 				// A top-level []byte that is not directly assignable must NOT be
 				// silently coerced into a string/other type (it would marshal to a
-				// base64 string), so it is rejected just like before. Other
-				// reconstructed values (e.g. a map[string]interface{} containing
-				// []byte) fall back to a json.Marshal/Unmarshal round-trip so typed
-				// handlers such as func(v struct{ File []byte }) still receive the
-				// value; encoding/json round-trips []byte through base64 back into a
+				// base64 string), so it is rejected just like before — UNLESS the
+				// parameter is itself a uint8-slice kind (a defined byte-slice type
+				// such as `type Blob []Octet` with `type Octet uint8`), which the
+				// round-trip decodes back into the typed bytes exactly as it would
+				// for the equivalent base64 JSON payload. Other reconstructed values
+				// (e.g. a map[string]interface{} containing []byte) fall back to a
+				// json.Marshal/Unmarshal round-trip so typed handlers such as
+				// func(v struct{ File []byte }) still receive the value;
+				// encoding/json round-trips []byte through base64 back into a
 				// []byte field, reproducing the original bytes.
-				if _, isBytes := in[i].([]byte); !isBytes && argValueOf.IsValid() {
+				_, isBytes := in[i].([]byte)
+				bytesTarget := argType.Kind() == reflect.Slice && argType.Elem().Kind() == reflect.Uint8
+				if (!isBytes || bytesTarget) && argValueOf.IsValid() {
 					converted := reflect.New(argType).Interface()
 					marshaled, err := json.Marshal(in[i])
 					if err != nil {
