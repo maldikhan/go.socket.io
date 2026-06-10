@@ -452,3 +452,25 @@ func TestClient_Connect_Timeout_CloseAborts(t *testing.T) {
 		"a concurrent Close must not be misreported as a timeout")
 	assert.Less(t, time.Since(start), 10*time.Second, "Close must abort Connect promptly")
 }
+
+// TestClient_Connect_Timeout_UpgradeFailure verifies that a failed transport
+// upgrade is surfaced by a timed Connect(): handleHandshake releases the gates
+// on the error path (so parked Send()s wake), and gate closure alone must not
+// be mistaken for success.
+func TestClient_Connect_Timeout_UpgradeFailure(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	client, mockWs := setupUpgradeScenario(t, ctrl, 5*time.Second)
+
+	// The probe ping cannot be written: the upgrade fails after the transports
+	// were already swapped, leaving the client unusable.
+	probeErr := errors.New("probe send failed")
+	mockWs.EXPECT().SendMessage([]byte("2probe")).Return(probeErr)
+
+	err := client.Connect(context.Background())
+	require.Error(t, err, "a failed upgrade must not be reported as a successful connect")
+	assert.ErrorIs(t, err, probeErr)
+	assert.NotErrorIs(t, err, context.DeadlineExceeded)
+}

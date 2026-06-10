@@ -48,6 +48,13 @@ type Client struct {
 	// races with transportUpgrade() or Close().
 	transportMu sync.RWMutex
 
+	// handshakeErr records a handshake/upgrade failure that released the
+	// connection gates without establishing the session, so a timed Connect()
+	// waiting on those gates reports the failure instead of success. Set by
+	// handleHandshake, cleared by connect() when the gates are re-armed.
+	// Guarded by transportMu.
+	handshakeErr error
+
 	// connectCancel cancels the connection context created by Connect() when
 	// a connect timeout is configured. It is stored so Close() can release the
 	// context (and its resources) early instead of waiting for the parent
@@ -168,15 +175,23 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 		}
 		timer.Stop()
-		// The gates are also released by Close() (so parked Send()s fail fast),
-		// so waking here does not by itself mean the handshake succeeded: a
-		// concurrent Close() must not let Connect report success on a closed
-		// client. Only return success when the client is still live.
+		// The gates are also released by Close() (so parked Send()s fail fast)
+		// and by a failed transport upgrade, so waking here does not by itself
+		// mean the handshake succeeded: a concurrent Close() or an upgrade
+		// error must not let Connect report success. Only return success when
+		// the client is still live and no handshake failure was recorded.
 		c.transportMu.RLock()
 		closed := c.transport == nil
+		hsErr := c.handshakeErr
 		c.transportMu.RUnlock()
-		if connCtx.Err() == nil && !closed {
+		if connCtx.Err() == nil && !closed && hsErr == nil {
 			return nil
+		}
+		if hsErr != nil && connCtx.Err() == nil {
+			// The handshake/upgrade itself failed: tear down and surface that
+			// error rather than a generic cancellation cause.
+			_ = c.Close()
+			return fmt.Errorf("engine.io: connect failed: %w", hsErr)
 		}
 		// The timeout fired (or the client was closed) while the handshake was
 		// completing: the transports are already shutting down, so report the
@@ -215,6 +230,7 @@ func (c *Client) connect(ctx context.Context) error {
 	c.transportMu.Lock()
 	c.hadHandshake = sync.Once{}
 	c.waitHandshake = make(chan struct{}, 1)
+	c.handshakeErr = nil
 	c.transportMu.Unlock()
 
 	err = c.transport.RequestHandshake()
@@ -351,6 +367,13 @@ func (c *Client) handleHandshake(data []byte) error {
 			if newTransport, found := c.supportedTransports[engineio_v4.EngineIOTransport(newTransportName)]; found {
 				err = c.transportUpgrade(newTransport)
 				if err != nil {
+					// Record the failure BEFORE releasing the gate: a timed
+					// Connect() waiting on waitHandshake must observe it and
+					// report the failed upgrade instead of success (gate
+					// closure alone does not mean the connect succeeded).
+					c.transportMu.Lock()
+					c.handshakeErr = err
+					c.transportMu.Unlock()
 					// Close the handshake gate so that any Send() caller
 					// waiting on waitHandshake doesn't block forever.
 					c.hadHandshake.Do(func() {
