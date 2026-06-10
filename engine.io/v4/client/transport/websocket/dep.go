@@ -17,6 +17,8 @@ type Logger interface {
 type WebSocket interface {
 	Dial(ctx context.Context, url *url.URL, origin *url.URL) (err error)
 	Send(v []byte) (err error)
+	SendBinary(v []byte) (err error)
 	Receive(v *[]byte) (err error)
+	ReceiveFrame(v *[]byte) (isBinary bool, err error)
 	Close() error
 }

@@ -77,6 +77,7 @@ func NewClient(options ...ClientOption) (*Client, error) {
 
 	client.engineio.On("connect", client.connectSocketIO)
 	client.engineio.On("message", client.onMessage)
+	client.engineio.On("binary", client.onBinaryAttachment)
 
 	return client.Client, nil
 }

@@ -19,11 +19,11 @@ const defaultHTTPTimeout = 30 * time.Second
 func NewTransport(options ...EngineTransportOption) (*Transport, error) {
 	// Create default client
 	client := &Transport{
-		log:            &utils.DefaultLogger{},
-		httpClient:     &http.Client{Timeout: defaultHTTPTimeout},
-		pinger:         time.NewTicker(10 * time.Second),
-		stopPooling:    make(chan struct{}, 1),
-		stopCh:         make(chan struct{}),
+		log:              &utils.DefaultLogger{},
+		httpClient:       &http.Client{Timeout: defaultHTTPTimeout},
+		pinger:           time.NewTicker(10 * time.Second),
+		stopPooling:      make(chan struct{}, 1),
+		stopCh:           make(chan struct{}),
 		maxPayloadSize:   4 * 1024 * 1024, // 4MB default, matches socket.io JS maxHttpBufferSize
 		redactPayload:    true,            // production-safe default; WithDebugPayload(true) opts out
 		pollErrorBackoff: defaultPollErrorBackoff,

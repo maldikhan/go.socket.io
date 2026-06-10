@@ -3,6 +3,7 @@ package engineio_v4_client_transport
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -33,7 +34,7 @@ type Transport struct {
 	sid string
 	ctx context.Context
 
-	messages    chan<- []byte
+	messages    chan<- engineio_v4.Frame
 	onClose     chan<- error
 	stopPooling chan struct{}
 
@@ -136,7 +137,7 @@ func (c *Transport) Run(
 	ctx context.Context,
 	url *url.URL,
 	sid string,
-	messagesChan chan<- []byte,
+	messagesChan chan<- engineio_v4.Frame,
 	onClose chan<- error,
 ) error {
 	c.ctx = ctx
@@ -366,21 +367,63 @@ func (c *Transport) poll() error {
 
 	c.log.Debugf("receiveHttp: %s", c.payload(body))
 
-	select {
-	case c.messages <- body:
-	case <-c.ctx.Done():
-		return c.ctx.Err()
-	case <-c.stopCh:
-		// Stop() was called while we were blocked sending. stopCh is a closed
-		// channel (broadcast), so pollingLoop's own stopPooling case remains
-		// intact — it will still exit cleanly via the value Stop() enqueued.
-		return errTransportStopped
+	// A long-polling body may carry several engine.io packets joined by the
+	// record separator (U+001E). Split here, at the transport that owns the
+	// long-polling framing, and deliver one packet per frame. The WebSocket
+	// transport already frames each packet on its own, so the separator never
+	// leaks into the engine.io client.
+	for _, record := range splitRecords(body) {
+		if len(record) == 0 {
+			continue
+		}
+		select {
+		case c.messages <- engineio_v4.Frame{Data: record}:
+		case <-c.ctx.Done():
+			return c.ctx.Err()
+		case <-c.stopCh:
+			// Stop() was called while we were blocked sending. stopCh is a closed
+			// channel (broadcast), so pollingLoop's own stopPooling case remains
+			// intact — it will still exit cleanly via the value Stop() enqueued.
+			return errTransportStopped
+		}
 	}
 	return nil
 }
 
-func (c *Transport) SendMessage(msg []byte) error {
+// recordSeparator is the engine.io v4 payload delimiter (U+001E) that joins
+// multiple packets inside a single HTTP long-polling body.
+const recordSeparator = '\x1e'
 
+// splitRecords splits a long-polling body on the engine.io record separator. A
+// body without separators yields a single record, so single-packet responses
+// (including every handshake) flow through unchanged.
+func splitRecords(data []byte) [][]byte {
+	var out [][]byte
+	start := 0
+	for i := 0; i < len(data); i++ {
+		if data[i] == recordSeparator {
+			out = append(out, data[start:i])
+			start = i + 1
+		}
+	}
+	return append(out, data[start:])
+}
+
+func (c *Transport) SendMessage(msg []byte) error {
+	return c.post(msg)
+}
+
+// SendBinary POSTs a raw binary attachment encoded as the engine.io v4 base64
+// "b"-record. Over HTTP long-polling binary cannot travel as its own frame, so
+// it is sent as a base64 text record the server decodes back to bytes.
+func (c *Transport) SendBinary(msg []byte) error {
+	encoded := make([]byte, 1, base64.StdEncoding.EncodedLen(len(msg))+1)
+	encoded[0] = 'b'
+	encoded = append(encoded, []byte(base64.StdEncoding.EncodeToString(msg))...)
+	return c.post(encoded)
+}
+
+func (c *Transport) post(msg []byte) error {
 	c.log.Debugf("sendHttp: %s", c.payload(msg))
 	req, err := http.NewRequestWithContext(c.ctx, "POST", c.buildHttpUrl().String(), bytes.NewReader(msg))
 	if err != nil {

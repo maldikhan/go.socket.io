@@ -18,7 +18,7 @@ type Transport struct {
 	origin *url.URL
 	ctx    context.Context
 
-	messages    chan<- []byte
+	messages    chan<- engineio_v4.Frame
 	onClose     chan<- error
 	stopPooling chan struct{}
 	mu          sync.RWMutex
@@ -55,7 +55,7 @@ func (c *Transport) Run(
 	ctx context.Context,
 	url *url.URL,
 	sid string,
-	messagesChan chan<- []byte,
+	messagesChan chan<- engineio_v4.Frame,
 	onClose chan<- error,
 ) error {
 	c.ctx = ctx
@@ -149,18 +149,18 @@ func (c *Transport) wsReadLoop() error {
 	// then delivers that error into the buffer (no reader required) and exits.
 	// Only one reader goroutine is ever in flight at a time, so a capacity of 1
 	// is sufficient.
-	messageCh := make(chan []byte, 1)
+	messageCh := make(chan engineio_v4.Frame, 1)
 	errorCh := make(chan error, 1)
 	for {
 		// Run ws read in goroutine
 		go func() {
 			var message []byte
-			err := c.ws.Receive(&message)
+			isBinary, err := c.ws.ReceiveFrame(&message)
 			if err != nil {
 				errorCh <- err
 				return
 			}
-			messageCh <- message
+			messageCh <- engineio_v4.Frame{Data: message, IsBinary: isBinary}
 		}()
 
 		select {
@@ -181,11 +181,11 @@ func (c *Transport) wsReadLoop() error {
 			}
 			return c.ctx.Err()
 
-		case message := <-messageCh:
+		case frame := <-messageCh:
 			// New message received
-			c.log.Debugf("receiveWs: %s", c.payload(message))
+			c.log.Debugf("receiveWs: %s", c.payload(frame.Data))
 			select {
-			case c.messages <- message:
+			case c.messages <- frame:
 			case <-c.stopPooling:
 				c.log.Debugf("Stop signal received, exiting ws read loop")
 				select {
@@ -217,4 +217,12 @@ func (c *Transport) wsReadLoop() error {
 func (c *Transport) SendMessage(msg []byte) error {
 	c.log.Debugf("sendWs: %s", c.payload(msg))
 	return c.ws.Send(msg)
+}
+
+// SendBinary writes a raw binary attachment as a WebSocket binary frame. The
+// engine.io binary marker / base64 encoding is not applied over websocket:
+// binary travels in its own frame type.
+func (c *Transport) SendBinary(msg []byte) error {
+	c.log.Debugf("sendWsBinary: %s", c.payload(msg))
+	return c.ws.SendBinary(msg)
 }

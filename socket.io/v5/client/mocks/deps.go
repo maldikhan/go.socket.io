@@ -36,6 +36,20 @@ func (m *MockParser) EXPECT() *MockParserMockRecorder {
 	return m.recorder
 }
 
+// HasBinary mocks base method.
+func (m *MockParser) HasBinary(event *socketio_v5.Event) bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "HasBinary", event)
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// HasBinary indicates an expected call of HasBinary.
+func (mr *MockParserMockRecorder) HasBinary(event interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HasBinary", reflect.TypeOf((*MockParser)(nil).HasBinary), event)
+}
+
 // Parse mocks base method.
 func (m *MockParser) Parse(arg0 []byte) (*socketio_v5.Message, error) {
 	m.ctrl.T.Helper()
@@ -51,6 +65,20 @@ func (mr *MockParserMockRecorder) Parse(arg0 interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Parse", reflect.TypeOf((*MockParser)(nil).Parse), arg0)
 }
 
+// ReconstructBinary mocks base method.
+func (m *MockParser) ReconstructBinary(msg *socketio_v5.Message, attachments [][]byte) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ReconstructBinary", msg, attachments)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ReconstructBinary indicates an expected call of ReconstructBinary.
+func (mr *MockParserMockRecorder) ReconstructBinary(msg, attachments interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReconstructBinary", reflect.TypeOf((*MockParser)(nil).ReconstructBinary), msg, attachments)
+}
+
 // Serialize mocks base method.
 func (m *MockParser) Serialize(arg0 *socketio_v5.Message) ([]byte, error) {
 	m.ctrl.T.Helper()
@@ -64,6 +92,22 @@ func (m *MockParser) Serialize(arg0 *socketio_v5.Message) ([]byte, error) {
 func (mr *MockParserMockRecorder) Serialize(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Serialize", reflect.TypeOf((*MockParser)(nil).Serialize), arg0)
+}
+
+// SerializeBinary mocks base method.
+func (m *MockParser) SerializeBinary(arg0 *socketio_v5.Message) ([]byte, [][]byte, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SerializeBinary", arg0)
+	ret0, _ := ret[0].([]byte)
+	ret1, _ := ret[1].([][]byte)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// SerializeBinary indicates an expected call of SerializeBinary.
+func (mr *MockParserMockRecorder) SerializeBinary(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SerializeBinary", reflect.TypeOf((*MockParser)(nil).SerializeBinary), arg0)
 }
 
 // WrapCallback mocks base method.
@@ -155,6 +199,20 @@ func (m *MockEngineIOClient) Send(message []byte) error {
 func (mr *MockEngineIOClientMockRecorder) Send(message interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Send", reflect.TypeOf((*MockEngineIOClient)(nil).Send), message)
+}
+
+// SendBinary mocks base method.
+func (m *MockEngineIOClient) SendBinary(message []byte) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SendBinary", message)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SendBinary indicates an expected call of SendBinary.
+func (mr *MockEngineIOClientMockRecorder) SendBinary(message interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendBinary", reflect.TypeOf((*MockEngineIOClient)(nil).SendBinary), message)
 }
 
 // MockLogger is a mock of Logger interface.

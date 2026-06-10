@@ -26,13 +26,17 @@ type Transport interface {
 		ctx context.Context,
 		url *url.URL,
 		sid string,
-		messagesChan chan<- []byte,
+		messagesChan chan<- engineio_v4.Frame,
 		onClose chan<- error,
 	) error
 	SetHandshake(handshake *engineio_v4.HandshakeResponse)
 	RequestHandshake() error
 	Stop() error
 	SendMessage(message []byte) error
+	// SendBinary delivers a raw binary attachment over the transport. Over
+	// websocket this is a binary frame; over HTTP long-polling it is encoded
+	// as a base64 "b"-prefixed record by the transport.
+	SendBinary(message []byte) error
 }
 
 // Logger представляет интерфейс для логирования

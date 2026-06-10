@@ -168,6 +168,21 @@ func (mr *MockWebSocketMockRecorder) Receive(v interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Receive", reflect.TypeOf((*MockWebSocket)(nil).Receive), v)
 }
 
+// ReceiveFrame mocks base method.
+func (m *MockWebSocket) ReceiveFrame(v *[]byte) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ReceiveFrame", v)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ReceiveFrame indicates an expected call of ReceiveFrame.
+func (mr *MockWebSocketMockRecorder) ReceiveFrame(v interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReceiveFrame", reflect.TypeOf((*MockWebSocket)(nil).ReceiveFrame), v)
+}
+
 // Send mocks base method.
 func (m *MockWebSocket) Send(v []byte) error {
 	m.ctrl.T.Helper()
@@ -180,4 +195,18 @@ func (m *MockWebSocket) Send(v []byte) error {
 func (mr *MockWebSocketMockRecorder) Send(v interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Send", reflect.TypeOf((*MockWebSocket)(nil).Send), v)
+}
+
+// SendBinary mocks base method.
+func (m *MockWebSocket) SendBinary(v []byte) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SendBinary", v)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SendBinary indicates an expected call of SendBinary.
+func (mr *MockWebSocketMockRecorder) SendBinary(v interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendBinary", reflect.TypeOf((*MockWebSocket)(nil).SendBinary), v)
 }

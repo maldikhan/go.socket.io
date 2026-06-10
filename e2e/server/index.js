@@ -28,6 +28,37 @@ function wire(socket, ns) {
     socket.emit('welcome', 'hello ' + name);
   });
 
+  // "binEcho" echoes a binary Buffer back through the ack callback, exercising
+  // the socket.io binary attachment (PacketBinaryAck) path.
+  socket.on('binEcho', (buf, ack) => {
+    if (typeof ack === 'function') {
+      ack(buf);
+    }
+  });
+
+  // "binMulti" acks with BOTH buffers, exercising multi-attachment encoding in
+  // both directions (two placeholders in one packet).
+  socket.on('binMulti', (a, b, ack) => {
+    if (typeof ack === 'function') {
+      ack(a, b);
+    }
+  });
+
+  // "binNested" echoes an object that mixes a binary Buffer, a null and a
+  // plain string back through the ack, exercising placeholder substitution at
+  // nested positions and null handling next to real attachments.
+  socket.on('binNested', (obj, ack) => {
+    if (typeof ack === 'function') {
+      ack({ file: obj.file, note: obj.note, name: obj.name });
+    }
+  });
+
+  // "binPush" triggers a server-pushed "binWelcome" event carrying a binary
+  // Buffer (PacketBinaryEvent), so the client receives []byte without an ack.
+  socket.on('binPush', (name) => {
+    socket.emit('binWelcome', Buffer.from(String(name)));
+  });
+
   // eslint-disable-next-line no-console
   console.log('client connected on namespace ' + ns + ': ' + socket.id);
 }

@@ -191,3 +191,72 @@ func TestEngineIOV4Parser_Serialize_CustomLimit(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, "message data too large", err.Error())
 }
+
+func TestEngineIOV4Parser_ParseBinary(t *testing.T) {
+	parser := &EngineIOV4Parser{}
+
+	t.Run("base64 binary attachment", func(t *testing.T) {
+		// "bAQIDBA==" decodes to {1,2,3,4}.
+		got, err := parser.Parse([]byte("bAQIDBA=="))
+		assert.NoError(t, err)
+		assert.Equal(t, &engineio_v4.Message{
+			Type:   engineio_v4.PacketMessage,
+			Data:   []byte{1, 2, 3, 4},
+			Binary: true,
+		}, got)
+	})
+
+	t.Run("empty base64 attachment", func(t *testing.T) {
+		got, err := parser.Parse([]byte("b"))
+		assert.NoError(t, err)
+		assert.Equal(t, &engineio_v4.Message{
+			Type:   engineio_v4.PacketMessage,
+			Data:   []byte{},
+			Binary: true,
+		}, got)
+	})
+
+	t.Run("invalid base64", func(t *testing.T) {
+		_, err := parser.Parse([]byte("b!!!notbase64"))
+		assert.Error(t, err)
+	})
+}
+
+func TestEngineIOV4Parser_SerializeBinary(t *testing.T) {
+	parser := &EngineIOV4Parser{}
+
+	got, err := parser.Serialize(&engineio_v4.Message{
+		Type:   engineio_v4.PacketMessage,
+		Data:   []byte{1, 2, 3, 4},
+		Binary: true,
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("bAQIDBA=="), got)
+
+	// Oversized binary still hits the size guard.
+	_, err = parser.Serialize(&engineio_v4.Message{
+		Type:   engineio_v4.PacketMessage,
+		Data:   make([]byte, 65*1024*1024),
+		Binary: true,
+	})
+	assert.Error(t, err)
+}
+
+// TestEngineIOV4Parser_BinaryRoundTrip ensures Serialize/Parse are inverse for
+// binary attachments over the base64 long-polling representation.
+func TestEngineIOV4Parser_BinaryRoundTrip(t *testing.T) {
+	parser := &EngineIOV4Parser{}
+	original := []byte{0x00, 0x10, 0xFF, 0x42, 0x7F}
+
+	wire, err := parser.Serialize(&engineio_v4.Message{
+		Type:   engineio_v4.PacketMessage,
+		Data:   original,
+		Binary: true,
+	})
+	assert.NoError(t, err)
+
+	got, err := parser.Parse(wire)
+	assert.NoError(t, err)
+	assert.True(t, got.Binary)
+	assert.Equal(t, original, got.Data)
+}
