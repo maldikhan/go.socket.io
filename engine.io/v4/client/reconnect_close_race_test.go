@@ -698,3 +698,53 @@ func TestSuperviseContextErrorOnTransportClosed(t *testing.T) {
 	default:
 	}
 }
+
+// TestSuperviseCloseHandlerCallsClose reproduces the review finding: with
+// reconnect disabled, the close handler runs on the supervisor goroutine, and
+// a handler that reacts to the drop by calling Close() must not deadlock —
+// neither waiting on supervisorDone (closed only after the handler returns)
+// nor draining the transportClosed channel whose single notification the
+// supervisor already consumed.
+func TestSuperviseCloseHandlerCallsClose(t *testing.T) {
+	t.Parallel()
+	client, transport, _, _ := newReconnectClient(t)
+	client.reconnect = false
+
+	closed := make(chan error, 1)
+	closed <- errors.New("dropped")
+	client.transportMu.Lock()
+	client.transportClosed = closed
+	client.transportMu.Unlock()
+	atomic.StoreUint32(&client.supervisorStarted, 1)
+
+	transport.EXPECT().Stop().Return(nil).AnyTimes()
+
+	closeErr := make(chan error, 1)
+	client.closeHandler = func() {
+		closeErr <- client.Close()
+	}
+
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		client.supervise(closed, done)
+		close(finished)
+	}()
+
+	select {
+	case err := <-closeErr:
+		assert.NoError(t, err, "Close from the close handler must complete")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close called from the close handler deadlocked")
+	}
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervise did not return")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisorDone was not closed")
+	}
+}

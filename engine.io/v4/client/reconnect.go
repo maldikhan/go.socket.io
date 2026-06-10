@@ -97,8 +97,20 @@ func (c *Client) supervise(closed chan error, done chan struct{}) {
 	}
 
 	if !c.reconnect {
-		// Reconnection disabled: surface the drop to the close handler so the
-		// behaviour matches the pre-reconnect client exactly.
+		// Reconnection disabled: the drop is terminal for this client. Release
+		// the cycle state BEFORE surfacing it to the close handler, because a
+		// handler that reacts by calling Close() must not deadlock: with
+		// supervisorStarted still set, Close() would wait on supervisorDone —
+		// which this goroutine only closes after the handler returns — and
+		// with the flag cleared it would instead block draining the
+		// transportClosed channel whose single notification was already
+		// consumed above. The channel is closed here (the dead transport sends
+		// exactly one value) so that drain returns immediately.
+		atomic.StoreUint32(&c.supervisorStarted, 0)
+		close(closed)
+
+		// Surface the drop to the close handler so the behaviour matches the
+		// pre-reconnect client exactly.
 		c.handlerMu.RLock()
 		handler := c.closeHandler
 		c.handlerMu.RUnlock()
