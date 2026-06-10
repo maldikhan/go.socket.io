@@ -474,3 +474,30 @@ func TestClient_Connect_Timeout_UpgradeFailure(t *testing.T) {
 	assert.ErrorIs(t, err, probeErr)
 	assert.NotErrorIs(t, err, context.DeadlineExceeded)
 }
+
+// TestClient_Connect_Timeout_UpgradePacketWriteFailure verifies that a failure
+// to write the final PacketUpgrade (after the server answered the probe) is
+// surfaced by a timed Connect(): the pong handler releases the upgrade gate on
+// that path, and gate closure alone must not be mistaken for success.
+func TestClient_Connect_Timeout_UpgradePacketWriteFailure(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	client, mockWs := setupUpgradeScenario(t, ctrl, 5*time.Second)
+
+	// The probe is answered, but the final upgrade packet cannot be written.
+	upgradeErr := errors.New("upgrade write failed")
+	mockWs.EXPECT().SendMessage([]byte("2probe")).DoAndReturn(func([]byte) error {
+		go func() {
+			client.messages <- []byte("3probe")
+		}()
+		return nil
+	})
+	mockWs.EXPECT().SendMessage([]byte("5")).Return(upgradeErr)
+
+	err := client.Connect(context.Background())
+	require.Error(t, err, "a failed upgrade write must not be reported as a successful connect")
+	assert.ErrorIs(t, err, upgradeErr)
+	assert.NotErrorIs(t, err, context.DeadlineExceeded)
+}

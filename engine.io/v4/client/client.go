@@ -451,15 +451,23 @@ func (c *Client) handlePacket(packetData []byte) error {
 			err := c.sendPacket(&engineio_v4.Message{
 				Type: engineio_v4.PacketUpgrade,
 			})
+			if err != nil {
+				// Record the failure BEFORE releasing the upgrade gate (like
+				// the transportUpgrade error path does for the handshake
+				// gate): a timed Connect() waiting on waitUpgrade must report
+				// the failed upgrade write instead of success.
+				c.transportMu.Lock()
+				c.handshakeErr = err
+				c.transportMu.Unlock()
+			}
 			c.hadUpgrade.Do(func() {
 				close(c.waitUpgrade)
 			})
 			if err != nil {
 				c.log.Errorf("send upgrade error: %s", err)
 				return err
-			} else {
-				c.log.Debugf("Protocol upgraded")
 			}
+			c.log.Debugf("Protocol upgraded")
 		}
 	case engineio_v4.PacketMessage:
 		c.handlerMu.RLock()
