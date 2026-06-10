@@ -24,6 +24,20 @@ import (
 // context.Canceled before it can reach public API callers.
 var errTransportStopped = errors.New("transport stopped")
 
+// pollStatusError reports a non-2xx polling response. Client-level (4xx)
+// rejections are fatal: the server refused the session itself (e.g. a 400
+// "Session ID unknown" after a server restart), so retrying with the same sid
+// can never succeed — the loop must stop and surface the drop to the engine
+// client's reconnect supervisor instead of polling the dead session forever.
+// Server-level (5xx) responses are treated as transient and retried.
+type pollStatusError struct{ status int }
+
+func (e *pollStatusError) Error() string {
+	return fmt.Sprintf("unexpected polling response status %d", e.status)
+}
+
+func (e *pollStatusError) fatal() bool { return e.status >= 400 && e.status < 500 }
+
 type Transport struct {
 	log        Logger
 	httpClient HttpClient
@@ -257,6 +271,20 @@ func (c *Transport) pollingLoop() error {
 			if c.ctx.Err() != nil {
 				return c.finishPolling(false, c.ctx.Err())
 			}
+			// A 4xx response means the server rejected the session itself (e.g.
+			// "Session ID unknown" after a restart): retrying the same sid can
+			// never succeed. Stop the loop and report the drop with the actual
+			// error so the engine client's reconnect supervisor starts a fresh
+			// session instead of this loop polling a dead sid forever.
+			var statusErr *pollStatusError
+			if errors.As(err, &statusErr) && statusErr.fatal() {
+				c.log.Errorf("fatal poll error, stopping transport: %s", err)
+				atomic.StoreUint32(&c.stopped, 1)
+				if c.onClose != nil {
+					c.onClose <- err
+				}
+				return err
+			}
 			// Genuine transient error (network blip, server hiccup): log and back
 			// off briefly, but stay responsive to stop/cancel during the pause.
 			c.log.Errorf("poll error: %s", err)
@@ -340,7 +368,7 @@ func (c *Transport) poll() error {
 	// forwarding the error body as an engine.io packet and hot-spinning.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("unexpected polling response status %d", resp.StatusCode)
+		return &pollStatusError{status: resp.StatusCode}
 	}
 
 	// Limit payload size to guard against OOM from a malicious/buggy server.
