@@ -1,9 +1,15 @@
 package engineio_v4_client
 
 import (
+	"errors"
 	"sync/atomic"
 	"time"
 )
+
+// errHandshakeIncomplete marks a reconnect attempt whose transport came up but
+// whose Engine.IO handshake never completed (malformed OPEN packet, failed
+// upgrade, or a transport drop before the OPEN arrived).
+var errHandshakeIncomplete = errors.New("engine.io handshake did not complete")
 
 // startSupervisor launches the reconnect supervisor for the current connection
 // cycle. It is invoked once per successful handshake (guarded by superviseOnce,
@@ -152,9 +158,22 @@ func (c *Client) reconnectLoop(cause error) {
 		c.log.Debugf("reconnect attempt %d/%d", attempt, c.reconnectAttempts)
 		err := c.startConnection(c.ctx)
 		if err == nil {
-			c.log.Infof("engine.io reconnected on attempt %d", attempt)
-			c.fireReconnect()
-			return
+			// startConnection only guarantees the handshake request was sent
+			// (for polling it returns once the first poll response is queued);
+			// the OPEN packet is processed asynchronously by the message loop.
+			// Only declare the reconnect successful once the handshake actually
+			// completed — otherwise a malformed response or a failed upgrade
+			// would fire "reconnect" for a session that never opened and
+			// silently end the retry loop.
+			if c.awaitConnectionEstablished(maxBackoff) {
+				c.log.Infof("engine.io reconnected on attempt %d", attempt)
+				c.fireReconnect()
+				return
+			}
+			if c.stopRequested() {
+				return
+			}
+			err = errHandshakeIncomplete
 		}
 		c.log.Errorf("reconnect attempt %d failed: %s", attempt, err)
 
@@ -174,6 +193,73 @@ func (c *Client) reconnectLoop(cause error) {
 	// which this very goroutine only closes after Close() returns — a deadlock.
 	atomic.StoreUint32(&c.supervisorStarted, 0)
 	_ = c.Close()
+}
+
+// awaitConnectionEstablished waits for the attempt started by startConnection
+// to finish its Engine.IO handshake: handleHandshake closes the waitHandshake
+// gate only after the OPEN packet is processed and an eventual transport
+// upgrade completed. It returns false — after tearing the half-open attempt
+// down — when the transport dies first, the bound elapses, the run context is
+// cancelled or Close() is called.
+func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
+	c.transportMu.RLock()
+	wh := c.waitHandshake
+	closed := c.transportClosed
+	transport := c.transport
+	c.transportMu.RUnlock()
+
+	// nil channels block forever in a select, which is exactly the desired
+	// fallback for clients built without NewClient/Connect (tests).
+	var ctxDone <-chan struct{}
+	if c.ctx != nil {
+		ctxDone = c.ctx.Done()
+	}
+	closeCh := c.closeCh
+
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+
+	select {
+	case <-wh:
+		return true
+	case <-closed:
+		// The transport died before the handshake completed. No supervisor is
+		// watching this cycle yet (it only starts once the handshake is
+		// processed), so this loop owns the teardown: close the drained channel
+		// so a later Close() doesn't block on it, and stop the orphaned
+		// message loop.
+		close(closed)
+		c.stopMessageLoop()
+		return false
+	case <-ctxDone:
+		// Context cancellation winds the transports and the message loop down
+		// on its own; nothing to tear down here.
+		return false
+	case <-closeCh:
+		// Close() owns the teardown (attempt finished, supervisor not started,
+		// so it drains transportClosed itself).
+		return false
+	case <-timer.C:
+		// The handshake did not complete in time: stop the half-open transport
+		// so the next retry starts clean.
+		if transport == nil {
+			c.stopMessageLoop()
+			return false
+		}
+		_ = transport.Stop()
+		select {
+		case <-closed:
+			close(closed)
+		case <-wh:
+			// The handshake completed at the very moment the bound elapsed and
+			// its supervisor now owns transportClosed; it will observe the
+			// Stop() above as a graceful close and exit. The transport is
+			// stopped either way, so still report failure and let the loop
+			// retry with fresh state.
+		}
+		c.stopMessageLoop()
+		return false
+	}
 }
 
 // stopRequested reports whether the reconnect loop should abort because the

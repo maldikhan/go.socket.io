@@ -46,6 +46,16 @@ func newReconnectClient(t *testing.T) (*Client, *mocks.MockTransport, *mocks.Moc
 	return client, transport, parser, logger
 }
 
+// completeHandshake closes the cycle's waitHandshake gate the way
+// handleHandshake would, so reconnect success paths in tests are recognised by
+// awaitConnectionEstablished.
+func completeHandshake(client *Client) {
+	client.transportMu.RLock()
+	wh := client.waitHandshake
+	client.transportMu.RUnlock()
+	client.hadHandshake.Do(func() { close(wh) })
+}
+
 // TestSuperviseGracefulNilError verifies that a nil close value (graceful stop)
 // makes the supervisor exit without firing any reconnect logic.
 func TestSuperviseGracefulNilError(t *testing.T) {
@@ -150,9 +160,14 @@ func TestSuperviseTriggersReconnect(t *testing.T) {
 	reconnected := make(chan struct{})
 	client.reconnectHandler = func() { close(reconnected) }
 
-	// reconnectLoop's first attempt re-runs the transport and handshakes.
+	// reconnectLoop's first attempt re-runs the transport and handshakes. The
+	// handshake gate is completed the way handleHandshake would, since the
+	// reconnect is only reported once the handshake actually finished.
 	transport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
-	transport.EXPECT().RequestHandshake().Return(nil)
+	transport.EXPECT().RequestHandshake().DoAndReturn(func() error {
+		completeHandshake(client)
+		return nil
+	})
 
 	closed := make(chan error, 1)
 	done := make(chan struct{})
@@ -219,7 +234,10 @@ func TestReconnectLoopSuccess(t *testing.T) {
 		transport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 			Return(nil),
 	)
-	transport.EXPECT().RequestHandshake().Return(nil)
+	transport.EXPECT().RequestHandshake().DoAndReturn(func() error {
+		completeHandshake(client)
+		return nil
+	})
 
 	client.reconnectLoop(errors.New("connection dropped"))
 

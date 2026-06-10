@@ -249,3 +249,185 @@ func TestStopMessageLoopAlreadyClosedStop(t *testing.T) {
 
 	assert.NotPanics(t, func() { client.stopMessageLoop() })
 }
+
+// TestAwaitConnectionEstablished covers the failure arms of the
+// post-startConnection handshake wait introduced for reconnect attempts.
+func TestAwaitConnectionEstablished(t *testing.T) {
+	t.Parallel()
+
+	t.Run("transport dies before the handshake", func(t *testing.T) {
+		t.Parallel()
+		client, _, _, _ := newReconnectClient(t)
+		client.transportMu.Lock()
+		client.waitHandshake = make(chan struct{}, 1)
+		client.transportClosed = make(chan error, 1)
+		client.transportClosed <- errors.New("dropped")
+		closed := client.transportClosed
+		client.transportMu.Unlock()
+
+		assert.False(t, client.awaitConnectionEstablished(time.Second))
+		// The drained channel must be closed so a later Close() doesn't block.
+		select {
+		case _, ok := <-closed:
+			assert.False(t, ok, "transportClosed must be closed after the drain")
+		default:
+			t.Fatal("transportClosed left open")
+		}
+	})
+
+	t.Run("handshake never completes within the bound", func(t *testing.T) {
+		t.Parallel()
+		client, transport, _, _ := newReconnectClient(t)
+		client.transportMu.Lock()
+		client.waitHandshake = make(chan struct{}, 1)
+		client.transportClosed = make(chan error, 1)
+		client.transportMu.Unlock()
+
+		transport.EXPECT().Stop().DoAndReturn(func() error {
+			client.transportClosed <- nil
+			return nil
+		})
+
+		assert.False(t, client.awaitConnectionEstablished(10*time.Millisecond))
+	})
+
+	t.Run("handshake completes exactly at the bound", func(t *testing.T) {
+		t.Parallel()
+		client, transport, _, _ := newReconnectClient(t)
+		client.transportMu.Lock()
+		client.waitHandshake = make(chan struct{}, 1)
+		client.transportClosed = make(chan error, 1)
+		client.transportMu.Unlock()
+
+		// Stop() races a handshake that completes right after the bound: the
+		// teardown select must take the waitHandshake arm and not block on the
+		// transportClosed channel the new supervisor would own.
+		transport.EXPECT().Stop().DoAndReturn(func() error {
+			completeHandshake(client)
+			return nil
+		})
+
+		assert.False(t, client.awaitConnectionEstablished(10*time.Millisecond))
+	})
+
+	t.Run("context cancellation", func(t *testing.T) {
+		t.Parallel()
+		client, _, _, _ := newReconnectClient(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		client.ctx = ctx
+		client.transportMu.Lock()
+		client.waitHandshake = make(chan struct{}, 1)
+		client.transportClosed = make(chan error, 1)
+		client.transportMu.Unlock()
+
+		assert.False(t, client.awaitConnectionEstablished(time.Second))
+	})
+
+	t.Run("close wakes the wait", func(t *testing.T) {
+		t.Parallel()
+		client, _, _, _ := newReconnectClient(t)
+		client.closeCh = make(chan struct{})
+		close(client.closeCh)
+		client.transportMu.Lock()
+		client.waitHandshake = make(chan struct{}, 1)
+		client.transportClosed = make(chan error, 1)
+		client.transportMu.Unlock()
+
+		assert.False(t, client.awaitConnectionEstablished(time.Second))
+	})
+
+	t.Run("nil transport at timeout", func(t *testing.T) {
+		t.Parallel()
+		client, _, _, _ := newReconnectClient(t)
+		client.transportMu.Lock()
+		client.transport = nil
+		client.waitHandshake = make(chan struct{}, 1)
+		client.transportClosed = make(chan error, 1)
+		client.transportMu.Unlock()
+
+		assert.False(t, client.awaitConnectionEstablished(10*time.Millisecond))
+	})
+}
+
+// TestReconnectLoopHandshakeIncomplete verifies that an attempt whose
+// handshake never completes is treated as failed and retried instead of
+// firing "reconnect" for a session that never opened.
+func TestReconnectLoopHandshakeIncomplete(t *testing.T) {
+	t.Parallel()
+	client, transport, _, _ := newReconnectClient(t)
+	client.reconnectAttempts = 2
+
+	var reconnected int32
+	client.reconnectHandler = func() { atomic.AddInt32(&reconnected, 1) }
+	failedCh := make(chan struct{})
+	client.reconnectFailedHand = func() { close(failedCh) }
+
+	// Every attempt starts fine but the OPEN packet never arrives, so the
+	// handshake gate stays open and the bound elapses. The Stop mock delivers
+	// exactly one close notification per Run (like a real transport): the
+	// extra Stop() from the exhaustion Close() must not send again into a
+	// channel the await teardown already drained and closed.
+	var lifecycleMu sync.Mutex
+	pendingRuns := 0
+	transport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(context.Context, *url.URL, string, chan<- []byte, chan<- error) error {
+			lifecycleMu.Lock()
+			pendingRuns++
+			lifecycleMu.Unlock()
+			return nil
+		}).Times(2)
+	transport.EXPECT().RequestHandshake().Return(nil).Times(2)
+	transport.EXPECT().Stop().DoAndReturn(func() error {
+		lifecycleMu.Lock()
+		defer lifecycleMu.Unlock()
+		if pendingRuns == 0 {
+			return nil
+		}
+		pendingRuns--
+		client.transportMu.RLock()
+		closed := client.transportClosed
+		client.transportMu.RUnlock()
+		closed <- nil
+		return nil
+	}).AnyTimes()
+
+	client.reconnectLoop(errors.New("connection dropped"))
+
+	select {
+	case <-failedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconnect_failed not fired for incomplete handshakes")
+	}
+	assert.Equal(t, int32(0), atomic.LoadInt32(&reconnected),
+		"reconnect must not fire when the handshake never completed")
+}
+
+// TestReconnectLoopStopDuringAwait verifies that a cancellation arriving while
+// the loop waits for the handshake makes the loop exit without further retries
+// or a reconnect_failed notification.
+func TestReconnectLoopStopDuringAwait(t *testing.T) {
+	t.Parallel()
+	client, transport, _, _ := newReconnectClient(t)
+	client.reconnectAttempts = 3
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client.ctx = ctx
+
+	var failed int32
+	client.reconnectFailedHand = func() { atomic.AddInt32(&failed, 1) }
+
+	transport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil).Times(1)
+	transport.EXPECT().RequestHandshake().DoAndReturn(func() error {
+		// The run context is cancelled while the loop is waiting for the
+		// handshake to complete.
+		cancel()
+		return nil
+	}).Times(1)
+
+	client.reconnectLoop(errors.New("connection dropped"))
+
+	assert.Equal(t, int32(0), atomic.LoadInt32(&failed),
+		"a cancelled session must not be reported as reconnect_failed")
+}
