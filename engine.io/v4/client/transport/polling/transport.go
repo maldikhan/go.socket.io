@@ -12,9 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	// Note: we use atomic.LoadUint32/StoreUint32 instead of atomic.Bool
-	// to maintain compatibility with Go 1.18 (atomic.Bool requires Go 1.19).
-
 	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 )
 
@@ -60,7 +57,7 @@ type Transport struct {
 	stopCh   chan struct{}
 	stopOnce sync.Once
 
-	stopped        uint32 // atomic; 0 = running, 1 = stopped
+	stopped        atomic.Bool // false = running, true = stopped
 	maxPayloadSize int64
 
 	// pollErrorBackoff is the pause after a failed poll before retrying, so a
@@ -158,7 +155,7 @@ func (c *Transport) Run(
 	c.messages = messagesChan
 	c.onClose = onClose
 	// Reset the stop state so the transport can be safely reused after a Stop().
-	atomic.StoreUint32(&c.stopped, 0)
+	c.stopped.Store(false)
 	// Reinitialize stopPooling channel to ensure fresh channel for new run.
 	c.stopPooling = make(chan struct{}, 1)
 	// Reinitialize the stop broadcast channel and its sync.Once as well —
@@ -182,7 +179,7 @@ func (c *Transport) Run(
 func (c *Transport) Stop() error {
 	// CAS ensures only one concurrent Stop() call proceeds;
 	// subsequent calls see stopped==1 and return immediately.
-	if !atomic.CompareAndSwapUint32(&c.stopped, 0, 1) {
+	if !c.stopped.CompareAndSwap(false, true) {
 		return nil
 	}
 	// Close stopCh to broadcast the stop signal to any poll() call that is
@@ -249,7 +246,7 @@ func (c *Transport) pollingLoop() error {
 		if err != nil {
 			// A request cancelled by Stop() (reqCtx) or by the parent context is
 			// a normal shutdown, not a transport error.
-			if atomic.LoadUint32(&c.stopped) == 1 {
+			if c.stopped.Load() {
 				return c.finishPolling(true, nil)
 			}
 			if c.ctx.Err() != nil {
@@ -279,7 +276,7 @@ func (c *Transport) finishPolling(stopRequested bool, ret error) error {
 	} else {
 		c.log.Debugf("context done, stop http polling")
 	}
-	atomic.StoreUint32(&c.stopped, 1)
+	c.stopped.Store(true)
 	if c.onClose != nil {
 		c.onClose <- c.ctx.Err()
 	}

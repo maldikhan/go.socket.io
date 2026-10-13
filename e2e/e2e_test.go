@@ -4,6 +4,8 @@ package e2e
 
 import (
 	"context"
+	"errors"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -170,4 +172,68 @@ func TestE2E_WebsocketOnly(t *testing.T) {
 // to cover the namespace connect/emit/ack path end-to-end.
 func TestE2E_Namespace(t *testing.T) {
 	runScenario(t, newClient(t, "default", socketio.WithDefaultNamespace("/admin")))
+}
+
+// TestE2E_ConnectTimeout_CompletesAgainstRealServer verifies that a client
+// configured with WithConnectTimeout connects to the real Socket.IO server
+// well within the bound: the timeout must only bound the connection phase
+// (dial, handshake, upgrade) and not break a healthy connect or the session
+// that follows it.
+func TestE2E_ConnectTimeout_CompletesAgainstRealServer(t *testing.T) {
+	client, err := socketio.NewClient(
+		socketio.WithRawURL(serverURL()),
+		socketio.WithConnectTimeout(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	runScenario(t, client)
+}
+
+// TestE2E_ConnectTimeout_UnresponsiveServer verifies the failure semantics of
+// WithConnectTimeout against a real TCP black hole: a listener that accepts
+// connections but never answers the HTTP handshake. Connect() must return
+// context.DeadlineExceeded promptly (bounded by the configured timeout, not by
+// the session context), proving the timeout actually bounds the connection
+// phase.
+func TestE2E_ConnectTimeout_UnresponsiveServer(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	// Accept and hold connections without ever responding, like a hung server.
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+		}
+	}()
+
+	client, err := socketio.NewClient(
+		socketio.WithRawURL("http://"+ln.Addr().String()),
+		socketio.WithConnectTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	// The session context is much larger than the connect timeout: the error
+	// must come from the timeout, not from this context.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err = client.Connect(ctx)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("connect to unresponsive server: err = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("connect took %s, want it bounded by the 2s connect timeout", elapsed)
+	}
 }

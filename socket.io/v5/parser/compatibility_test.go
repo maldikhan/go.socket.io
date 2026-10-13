@@ -16,9 +16,17 @@ import (
 var logger = &utils.DefaultLogger{Level: utils.NONE}
 
 var allParsers = map[string]socketio_v5_client.Parser{
-	"json": socketio_v5_parser_default.NewParser(
+	"json": mustNewParser(),
+}
+
+func mustNewParser() socketio_v5_client.Parser {
+	parser, err := socketio_v5_parser_default.NewParser(
 		socketio_v5_parser_default.WithLogger(logger),
-	),
+	)
+	if err != nil {
+		panic(err)
+	}
+	return parser
 }
 
 func TestWrapCallback(t *testing.T) {
