@@ -47,6 +47,7 @@ func TestTransportCallbackCanClose(t *testing.T) {
 			messages := make(chan engineio_v4.Frame, 1)
 			client.messages = messages
 			client.messagesDone = make(chan struct{})
+			client.messagesStop = make(chan struct{})
 			closed := client.transportClosed
 			transport.EXPECT().Stop().DoAndReturn(func() error { closed <- nil; return nil })
 			packetType := engineio_v4.PacketMessage
@@ -57,7 +58,7 @@ func TestTransportCallbackCanClose(t *testing.T) {
 			returned := make(chan error, 1)
 			client.On(event, func([]byte) { returned <- client.Close() })
 			loopDone := client.messagesDone
-			go client.messageLoop(client.ctx, messages, loopDone, nil)
+			go client.messageLoop(client.ctx, messages, loopDone, client.messagesStop)
 			messages <- engineio_v4.Frame{Data: []byte("packet")}
 			select {
 			case err := <-returned:
