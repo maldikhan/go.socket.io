@@ -2,11 +2,19 @@ package socketio_v5_client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
 )
+
+// ErrClientClosed is returned when Connect is called after Close.
+var ErrClientClosed = errors.New("socket.io: client is closed")
+
+// ErrConnectAlreadyStarted is returned after the client's one public Connect
+// call has started. Automatic reconnection continues within that session.
+var ErrConnectAlreadyStarted = errors.New("socket.io: Connect has already been called")
 
 type Client struct {
 	engineio EngineIOClient
@@ -14,8 +22,10 @@ type Client struct {
 	logger   Logger
 	timer    Timer
 
-	ctx   context.Context
-	mutex sync.RWMutex
+	ctx            context.Context
+	mutex          sync.RWMutex
+	connectStarted bool
+	closed         bool
 
 	handshakeData map[string]interface{}
 
@@ -154,6 +164,15 @@ func (c *Client) connectSocketIO(_ []byte) {
 
 func (c *Client) Connect(ctx context.Context, callbacks ...func(arg interface{})) error {
 	c.mutex.Lock()
+	if c.closed {
+		c.mutex.Unlock()
+		return ErrClientClosed
+	}
+	if c.connectStarted {
+		c.mutex.Unlock()
+		return ErrConnectAlreadyStarted
+	}
+	c.connectStarted = true
 	c.ctx = ctx
 	c.mutex.Unlock()
 	for _, callback := range callbacks {
@@ -192,6 +211,9 @@ func (c *Client) safeGo(fn func()) {
 }
 
 func (c *Client) Close() error {
+	c.mutex.Lock()
+	c.closed = true
+	c.mutex.Unlock()
 	err := c.engineio.Close()
 	c.binaryMu.Lock()
 	c.clearPendingLocked()

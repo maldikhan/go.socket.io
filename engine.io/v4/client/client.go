@@ -14,8 +14,14 @@ import (
 	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 )
 
-// errClientClosed is returned by connection attempts that race with Close().
-var errClientClosed = errors.New("client is closed")
+// ErrClientClosed is returned when Connect is called after Close.
+var ErrClientClosed = errors.New("client is closed")
+
+var errClientClosed = ErrClientClosed
+
+// ErrConnectAlreadyStarted is returned after the client's one public Connect
+// call has started. Create a new client to begin another manual session.
+var ErrConnectAlreadyStarted = errors.New("engine.io: Connect has already been called")
 
 var ErrConnectAborted = errors.New("engine.io: connect aborted: client closed")
 
@@ -44,6 +50,7 @@ type Client struct {
 	reconnectWait       time.Duration
 	connectTimeout      time.Duration
 	connectCancel       context.CancelFunc
+	connectStarted      bool // guarded by transportMu; automatic retries use startConnection
 	binaryHandler       func([]byte)
 	reconnect           bool
 	reconnectHandler    func()
@@ -144,6 +151,18 @@ func (c *Client) payload(data []byte) string {
 }
 
 func (c *Client) Connect(ctx context.Context) error {
+	c.transportMu.Lock()
+	if atomic.LoadUint32(&c.closing) == 1 {
+		c.transportMu.Unlock()
+		return ErrClientClosed
+	}
+	if c.connectStarted {
+		c.transportMu.Unlock()
+		return ErrConnectAlreadyStarted
+	}
+	c.connectStarted = true
+	c.transportMu.Unlock()
+
 	if c.connectTimeout <= 0 {
 		return c.connect(ctx)
 	}
@@ -154,6 +173,11 @@ func (c *Client) Connect(ctx context.Context) error {
 	// timer below) when the handshake does not complete in time.
 	connCtx, connCancel := context.WithCancel(ctx)
 	c.transportMu.Lock()
+	if atomic.LoadUint32(&c.closing) == 1 {
+		c.transportMu.Unlock()
+		connCancel()
+		return ErrClientClosed
+	}
 	c.connectCancel = connCancel
 	c.transportMu.Unlock()
 
@@ -271,9 +295,6 @@ func (c *Client) connect(ctx context.Context) error {
 	c.transportMu.Lock()
 	c.ctx = ctx
 	c.transportMu.Unlock()
-	// Mark the client as live so that an unexpected transport drop triggers a
-	// reconnect rather than being mistaken for an intentional Close.
-	atomic.StoreUint32(&c.closing, 0)
 	// Capture the initial (pre-upgrade) transport once so that reconnects can
 	// always start a fresh session on it. Connect is the only entry point that
 	// runs before any upgrade, so c.transport is still the initial transport here.

@@ -457,6 +457,10 @@ The following may be called concurrently from multiple goroutines:
   replayed; applications should use their own delivery IDs when replay is needed.
 - `WithConnectTimeout` bounds the Engine.IO handshake and transport upgrade.
   Wait for the Socket.IO `connect` event before treating a namespace as ready.
+- Call `Connect` once per client. Concurrent or repeated calls return
+  `ErrConnectAlreadyStarted`, and calling it after `Close` returns
+  `ErrClientClosed`. Construct a new client for another manual session;
+  automatic reconnect attempts remain part of the original session.
 - Custom parsers must explicitly support binary reconstruction to receive binary
   events. Text-only custom parsers retain their serialization behavior.
 - Use the default namespace option for a custom namespace. Multiplexing several
