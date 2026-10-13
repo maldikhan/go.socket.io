@@ -5,6 +5,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
+	mocks "github.com/maldikhan/go.socket.io/socket.io/v5/client/mocks"
 	"github.com/stretchr/testify/require"
 )
 
@@ -105,4 +106,38 @@ func TestWithMaxBinarySize(t *testing.T) {
 	require.Error(t, WithMaxBinarySize(-1)(init))
 	require.NoError(t, WithMaxBinarySize(4)(init))
 	require.Equal(t, 4, init.maxBinarySize)
+}
+
+type engineBinaryCapability struct {
+	*mocks.MockEngineIOClient
+	enabled bool
+}
+
+func (e engineBinaryCapability) SupportsBinary() bool { return e.enabled }
+
+func TestBinaryTransportCapabilityFailsBeforeSendingHeader(t *testing.T) {
+	c, engine := newBinaryClient(t)
+	c.engineio = engineBinaryCapability{MockEngineIOClient: engine, enabled: false}
+	// No transport Send/SendBinary/Close expectations: unsupported attachment
+	// capability must fail before any bytes of the header are committed.
+	require.ErrorContains(t, c.Emit("upload", []byte{1}), "does not support binary")
+}
+
+func TestBinaryTransportCapabilityPermitsSupportedSend(t *testing.T) {
+	c, engine := newBinaryClient(t)
+	c.engineio = engineBinaryCapability{MockEngineIOClient: engine, enabled: true}
+	engine.EXPECT().Send(gomock.Any()).Return(nil)
+	engine.EXPECT().SendBinary([]byte{1}).Return(nil)
+	require.NoError(t, c.Emit("upload", []byte{1}))
+}
+
+func TestBinaryAttachmentFailureClosesPoisonedSession(t *testing.T) {
+	c, engine := newBinaryClient(t)
+	engine.EXPECT().Send(gomock.Any()).Return(nil)
+	gomock.InOrder(
+		engine.EXPECT().SendBinary([]byte{1}).Return(nil),
+		engine.EXPECT().SendBinary([]byte{2}).Return(errBinaryTestClient),
+		engine.EXPECT().Close().Return(nil),
+	)
+	require.ErrorIs(t, c.Emit("upload", []byte{1}, []byte{2}, []byte{3}), errBinaryTestClient)
 }

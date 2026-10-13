@@ -1167,3 +1167,18 @@ func (c *Client) markClosed() (Transport, context.CancelFunc) {
 	})
 	return t, connectCancel
 }
+
+// SupportsBinary reports whether the current transport can send binary
+// attachments. Wrappers can use it before writing a multi-frame packet header.
+func (c *Client) SupportsBinary() bool {
+	c.transportMu.RLock()
+	t := c.transport
+	c.transportMu.RUnlock()
+	if _, ok := t.(BinaryTransport); !ok {
+		return false
+	}
+	if capability, ok := t.(interface{ SupportsBinary() bool }); ok {
+		return capability.SupportsBinary()
+	}
+	return true
+}

@@ -43,7 +43,7 @@ func echoServer(t *testing.T, options *websocket.AcceptOptions, requests chan<- 
 		if err != nil {
 			return
 		}
-		defer conn.CloseNow()
+		defer func() { _ = conn.CloseNow() }()
 		conn.SetReadLimit(8 * 1024 * 1024)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -137,12 +137,12 @@ func TestCustomHTTPClient(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.CloseNow()
+		defer func() { _ = conn.CloseNow() }()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		<-conn.CloseRead(ctx).Done()
 	}))
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 	ws := newBackend(t, WithHTTPClient(server.Client()))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -195,7 +195,7 @@ func TestNotConnected(t *testing.T) {
 	assert.Error(t, ws.Receive(nil))
 	assert.Error(t, ws.Dial(context.Background(), nil, nil))
 	server := httptest.NewServer(http.NotFoundHandler())
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 	assert.Error(t, ws.Dial(context.Background(), endpoint(t, server.URL), nil))
 	assert.Nil(t, ws.cancel, "failed dial must release its session context")
 }
@@ -207,7 +207,7 @@ func TestCloseAbortsDial(t *testing.T) {
 		close(started)
 		<-r.Context().Done()
 	}))
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 	ws := newBackend(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -296,13 +296,13 @@ func TestCloseHandshakeAndIdleCancellation(t *testing.T) {
 					peerClosed <- err
 					return
 				}
-				defer conn.CloseNow()
+				defer func() { _ = conn.CloseNow() }()
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				_, _, err = conn.Read(ctx)
 				peerClosed <- err
 			}))
-			defer server.Close()
+			defer func() { _ = server.Close() }()
 			ws := newBackend(t)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

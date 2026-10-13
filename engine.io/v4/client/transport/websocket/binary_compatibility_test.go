@@ -37,3 +37,28 @@ func TestCustomTextWebSocketUsesReceive(t *testing.T) {
 	require.ErrorIs(t, <-done, io.EOF)
 	require.ErrorContains(t, transport.SendBinary([]byte{1}), "does not support binary")
 }
+
+func TestSupportsBinaryRejectsTextOnlyWebSocket(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	ws := mocks.NewMockWebSocket(ctrl)
+	transport := &Transport{ws: ws}
+	require.True(t, transport.SupportsBinary())
+	transport.ws = textOnlyWebSocket{ws}
+	require.False(t, transport.SupportsBinary())
+}
+
+type capabilityWebSocket struct {
+	*mocks.MockWebSocket
+	enabled bool
+}
+
+func (ws capabilityWebSocket) SupportsBinary() bool { return ws.enabled }
+
+func TestSupportsBinaryPropagatesWebSocketCapability(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	ws := mocks.NewMockWebSocket(ctrl)
+	transport := &Transport{ws: capabilityWebSocket{MockWebSocket: ws, enabled: false}}
+	require.False(t, transport.SupportsBinary())
+	transport.ws = capabilityWebSocket{MockWebSocket: ws, enabled: true}
+	require.True(t, transport.SupportsBinary())
+}

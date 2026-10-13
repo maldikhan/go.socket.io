@@ -16,14 +16,14 @@ import (
 
 func TestSilentWebSocketTriggersPingTimeout(t *testing.T) {
 	server := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
-		defer ws.Close()
+		defer func() { _ = ws.Close() }()
 		if err := websocket.Message.Send(ws, `0{"sid":"silent","pingInterval":25,"pingTimeout":25}`); err != nil {
 			return
 		}
 		var packet string
 		_ = websocket.Message.Receive(ws, &packet)
 	}))
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 	transport, err := wsTransport.NewTransport(wsTransport.WithLogger(&utils.DefaultLogger{Level: utils.NONE}))
 	require.NoError(t, err)
 	failed := make(chan struct{}, 1)
@@ -36,7 +36,7 @@ func TestSilentWebSocketTriggersPingTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	require.NoError(t, client.Connect(ctx))
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	select {
 	case <-failed:
 		client.transportMu.RLock()

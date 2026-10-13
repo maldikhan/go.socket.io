@@ -45,7 +45,10 @@ wire format. A parser using separate attachments implements
 `socketio.BinaryEngineIOClient`; an Engine.IO transport implements
 `engineio.BinaryTransport`; a WebSocket adapter implements
 `websocket.BinaryWebSocket`. Missing outbound attachment capabilities return an
-explicit error.
+explicit error. Default Engine.IO and WebSocket transport wrappers expose an
+optional `SupportsBinary() bool` preflight, so unsupported adapters are rejected
+before a binary header is sent. An attachment write failure closes the session
+because its peer is still waiting for the remaining buffers.
 
 Existing `WithPayloadParser` integrations, including text-only parsers that
 represent raw JSON with `[]byte`, retain their previous text/base64 send behavior.

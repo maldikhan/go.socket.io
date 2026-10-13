@@ -267,3 +267,15 @@ func (c *Transport) SendBinary(msg []byte) error {
 	}
 	return binaryWS.SendBinary(msg)
 }
+
+// SupportsBinary checks the configured WebSocket adapter before an enclosing
+// Socket.IO client commits an attachment-bearing packet's text header.
+func (c *Transport) SupportsBinary() bool {
+	if _, ok := c.ws.(BinaryWebSocket); !ok {
+		return false
+	}
+	if capability, ok := c.ws.(interface{ SupportsBinary() bool }); ok {
+		return capability.SupportsBinary()
+	}
+	return true
+}

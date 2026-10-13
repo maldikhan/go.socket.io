@@ -259,6 +259,7 @@ func TestClient_sendPacket_BinarySendError(t *testing.T) {
 		client, mockEngine := newBinaryClient(t)
 		mockEngine.EXPECT().Send(gomock.Any()).Return(nil)
 		mockEngine.EXPECT().SendBinary(gomock.Any()).Return(errBinaryTestClient)
+		mockEngine.EXPECT().Close().Return(nil)
 		err := client.sendPacket(&socketio_v5.Message{
 			Type: socketio_v5.PacketEvent,
 			NS:   "/",

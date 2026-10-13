@@ -508,7 +508,9 @@ func TestClient_Connect_Timeout_CloseAborts(t *testing.T) {
 		return nil
 	})
 
+	closeDone := make(chan struct{})
 	go func() {
+		defer close(closeDone)
 		<-handshakeRequested
 		// Give Connect a moment to park on the handshake gate; even if Close
 		// wins this race, the gate release below still aborts Connect.
@@ -518,6 +520,11 @@ func TestClient_Connect_Timeout_CloseAborts(t *testing.T) {
 
 	start := time.Now()
 	err := client.Connect(context.Background())
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent Close did not finish")
+	}
 	assert.ErrorIs(t, err, ErrConnectAborted)
 	assert.NotErrorIs(t, err, context.DeadlineExceeded,
 		"a concurrent Close must not be misreported as a timeout")

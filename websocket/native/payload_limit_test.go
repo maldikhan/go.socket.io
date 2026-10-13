@@ -14,10 +14,10 @@ import (
 
 func TestWebSocketConnectionRejectsOversizedFrame(t *testing.T) {
 	server := httptest.NewServer(websocket.Handler(func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_ = websocket.Message.Send(conn, strings.Repeat("x", 4*1024*1024+1))
 	}))
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 	u, err := url.Parse(strings.Replace(server.URL, "http://", "ws://", 1))
 	require.NoError(t, err)
 	origin, err := url.Parse(server.URL)
@@ -26,7 +26,7 @@ func TestWebSocketConnectionRejectsOversizedFrame(t *testing.T) {
 	defer cancel()
 	ws := &WebSocketConnection{}
 	require.NoError(t, ws.Dial(ctx, u, origin))
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 	var data []byte
 	require.ErrorIs(t, ws.Receive(&data), websocket.ErrFrameTooLarge)
 	require.Empty(t, data)

@@ -158,6 +158,9 @@ func (c *Client) sendPacket(packet *socketio_v5.Message) error {
 		if !ok {
 			return errors.New("engine.io client does not support binary attachments")
 		}
+		if capability, ok := c.engineio.(interface{ SupportsBinary() bool }); ok && !capability.SupportsBinary() {
+			return errors.New("engine.io transport does not support binary attachments")
+		}
 		header, attachments, err := binaryParser.SerializeBinary(packet)
 		if err != nil {
 			return err
@@ -172,6 +175,10 @@ func (c *Client) sendPacket(packet *socketio_v5.Message) error {
 		}
 		for _, attachment := range attachments {
 			if err := binaryEngine.SendBinary(attachment); err != nil {
+				// The peer is waiting for the rest of this packet. Continuing to
+				// write on this session would misassociate subsequent frames or
+				// make every later text event invalid, so terminate the session.
+				_ = c.engineio.Close()
 				return err
 			}
 		}
