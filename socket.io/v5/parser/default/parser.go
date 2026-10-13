@@ -21,6 +21,9 @@ func (p *SocketIOV5DefaultParser) checkData(data []byte) (socketio_v5.SocketIOPa
 		return socketio_v5.PacketUnknown, fmt.Errorf("%w: %v", ErrParsePackage, "empty message")
 	}
 	eventType := socketio_v5.SocketIOPacket(data[0] - '0')
+	if eventType > socketio_v5.PacketBinaryAck {
+		return eventType, fmt.Errorf("%w: unknown packet type", ErrParsePackage)
+	}
 	return eventType, nil
 }
 
@@ -46,7 +49,10 @@ func (p *SocketIOV5DefaultParser) extractBinaryAttachments(msg *socketio_v5.Mess
 	if end == 0 || end >= len(packetData) || packetData[end] != '-' {
 		return nil, fmt.Errorf("%w: %v", ErrParsePackage, errors.New("missing attachment count"))
 	}
-	count, _ := strconv.Atoi(string(packetData[:end]))
+	count, err := strconv.Atoi(string(packetData[:end]))
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid attachment count: %v", ErrParsePackage, err)
+	}
 	msg.BinaryAttachments = &count
 	return packetData[end+1:], nil
 }
@@ -79,7 +85,10 @@ func (p *SocketIOV5DefaultParser) extractAckId(msg *socketio_v5.Message, packetD
 		}
 	}
 	if ackEnd > 0 {
-		ackId, _ := strconv.Atoi(string(packetData[:ackEnd]))
+		ackId, err := strconv.Atoi(string(packetData[:ackEnd]))
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid acknowledgement id: %v", ErrParsePackage, err)
+		}
 		msg.AckId = &ackId
 	}
 	return packetData[ackEnd:], nil
@@ -99,7 +108,8 @@ func (p *SocketIOV5DefaultParser) Parse(data []byte) (*socketio_v5.Message, erro
 	packetData := data[1:]
 	if len(packetData) == 0 {
 		switch msg.Type {
-		case socketio_v5.PacketBinaryEvent, socketio_v5.PacketBinaryAck:
+		case socketio_v5.PacketEvent, socketio_v5.PacketAck, socketio_v5.PacketConnectError,
+			socketio_v5.PacketBinaryEvent, socketio_v5.PacketBinaryAck:
 			return nil, fmt.Errorf("%w: %v", ErrParsePackage, errors.New("wrong package payload"))
 		}
 		return msg, nil

@@ -172,13 +172,9 @@ func TestSocketIOV5DefaultParser_Parse(t *testing.T) {
 			wantErr: ErrParsePackage,
 		},
 		{
-			name:  "Message with empty payload",
-			input: []byte(`2`),
-			want: &socketio_v5.Message{
-				Type: socketio_v5.PacketEvent,
-				NS:   "/",
-			},
-			wantErr: nil,
+			name:    "Message with empty payload",
+			input:   []byte(`2`),
+			wantErr: ErrParsePackage,
 		},
 		{
 			name:    "Message with invalid JSON payload",

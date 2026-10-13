@@ -69,6 +69,17 @@ func (p *SocketIOV5DefaultParser) ReconstructBinary(msg *socketio_v5.Message, at
 	if len(attachments) != expected {
 		return fmt.Errorf("%w: expected %d attachments, got %d", ErrParseBinary, expected, len(attachments))
 	}
+	if p.payloadParser != nil {
+		binaryParser, ok := p.payloadParser.(BinaryPayloadParser)
+		if !ok {
+			return fmt.Errorf("%w: custom payload parser does not support binary attachments", ErrParseBinary)
+		}
+		if err := binaryParser.ReconstructBinary(msg, attachments); err != nil {
+			return err
+		}
+		msg.BinaryAttachments = nil
+		return nil
+	}
 	if msg.Event != nil {
 		for i, payload := range msg.Event.Payloads {
 			raw, ok := payload.(json.RawMessage)
@@ -78,7 +89,9 @@ func (p *SocketIOV5DefaultParser) ReconstructBinary(msg *socketio_v5.Message, at
 				continue
 			}
 			var decoded interface{}
-			if err := json.Unmarshal(raw, &decoded); err != nil {
+			decoder := json.NewDecoder(bytes.NewReader(raw))
+			decoder.UseNumber() // keep typed callback integers exact beyond 2^53
+			if err := decoder.Decode(&decoded); err != nil {
 				return fmt.Errorf("%w: %v", ErrParseBinary, err)
 			}
 			replaced, err := replacePlaceholders(decoded, attachments)
@@ -140,11 +153,20 @@ func asPlaceholder(m map[string]interface{}, attachments [][]byte) ([]byte, bool
 	if !hasNum {
 		return nil, false, fmt.Errorf("%w: %v", ErrParseBinary, errors.New("placeholder without num"))
 	}
-	num, ok := numValue.(float64)
-	if !ok {
+	var num float64
+	switch value := numValue.(type) {
+	case float64:
+		num = value
+	case json.Number:
+		var err error
+		num, err = value.Float64()
+		if err != nil {
+			return nil, false, fmt.Errorf("%w: invalid placeholder number: %v", ErrParseBinary, err)
+		}
+	default:
 		return nil, false, fmt.Errorf("%w: %v", ErrParseBinary, errors.New("placeholder num is not a number"))
 	}
-	// num arrives as a JSON number (float64) straight off the wire. Reject a
+	// Parse the placeholder's number without truncating its value. Reject a
 	// fractional, negative, or out-of-range value rather than letting int(num)
 	// silently truncate it (e.g. 1.5 -> 1, substituting the wrong attachment) or
 	// overflow on a huge value and index out of bounds. Comparing as float64
@@ -161,6 +183,12 @@ func asPlaceholder(m map[string]interface{}, attachments [][]byte) ([]byte, bool
 func (p *SocketIOV5DefaultParser) HasBinary(event *socketio_v5.Event) bool {
 	if event == nil {
 		return false
+	}
+	if p.payloadParser != nil {
+		if _, ok := p.payloadParser.(BinaryPayloadParser); !ok {
+			// Preserve the text/base64 behavior of existing payload parsers.
+			return false
+		}
 	}
 	for _, payload := range event.Payloads {
 		if valueHasBinary(payload) {
@@ -275,9 +303,9 @@ func reflectHasBinary(rv reflect.Value, depth int) bool {
 	case reflect.Struct:
 		t := rv.Type()
 		for i := 0; i < rv.NumField(); i++ {
-			// Only exported fields are readable by reflect and marshalable by
-			// encoding/json; unexported fields can never become attachments.
-			if t.Field(i).PkgPath != "" {
+			// encoding/json promotes exported descendants of anonymous struct
+			// fields, including structs whose embedded type is unexported.
+			if !jsonVisibleField(t.Field(i)) {
 				continue
 			}
 			if reflectHasBinary(rv.Field(i), depth-1) {
@@ -330,6 +358,9 @@ func ownsEncoding(rv reflect.Value) bool {
 func extractBinary(value interface{}, attachments *[][]byte) (interface{}, error) {
 	if !valueHasBinary(value) {
 		return value, nil
+	}
+	if hasUnsupportedBinaryEmbedding(reflect.ValueOf(value), maxBinaryScanDepth) {
+		return nil, fmt.Errorf("%w: binary fields in unexported embedded pointers are unsupported; export the embedded type or pass its fields explicitly", ErrParseBinary)
 	}
 	nonce := make([]byte, sentinelNonceLen)
 	if _, err := randRead(nonce); err != nil {
@@ -391,17 +422,23 @@ func transformBinary(rv reflect.Value, sentinels map[string][]byte, nonce []byte
 		return nm
 	}
 
-	// Remaining binary-bearing kind: struct. A same-typed copy is built so json
-	// applies the real field tags during marshaling; only exported fields are
-	// copied (matching json and valueHasBinary), `json:"-"` fields are dropped,
-	// and an omitempty field that json would omit is left zero so it stays omitted
-	// rather than being forced in by a (non-empty) sentinel.
+	// Copy the complete struct so unexported anonymous value structs keep their
+	// JSON-visible descendants. Only writable exported descendants are changed.
 	ns := reflect.New(rv.Type()).Elem()
+	ns.Set(rv)
+	transformStructFields(rv, ns, sentinels, nonce, depth)
+	return ns
+}
+
+func transformStructFields(rv, ns reflect.Value, sentinels map[string][]byte, nonce []byte, depth int) {
+	if depth <= 0 {
+		return
+	}
 	t := rv.Type()
 	for i := 0; i < rv.NumField(); i++ {
 		field := t.Field(i)
-		if field.PkgPath != "" {
-			continue // unexported
+		if !jsonVisibleField(field) {
+			continue
 		}
 		skip, omitempty := jsonFieldOptions(field)
 		if skip {
@@ -411,9 +448,71 @@ func transformBinary(rv reflect.Value, sentinels map[string][]byte, nonce []byte
 		if omitempty && isEmptyValue(fv) {
 			continue
 		}
+		if field.PkgPath != "" {
+			// A private embedded value cannot itself be assigned, but its
+			// exported fields are settable on our freshly allocated copy.
+			if fv.Kind() == reflect.Struct && !ownsEncoding(fv) {
+				transformStructFields(fv, ns.Field(i), sentinels, nonce, depth-1)
+			}
+			continue
+		}
 		ns.Field(i).Set(transformBinary(fv, sentinels, nonce, depth-1))
 	}
-	return ns
+}
+
+func jsonVisibleField(field reflect.StructField) bool {
+	if field.PkgPath == "" {
+		return true
+	}
+	t := field.Type
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return field.Anonymous && t.Kind() == reflect.Struct
+}
+
+// A private embedded pointer cannot be detached with safe reflection. Reject
+// that binary-bearing shape explicitly instead of mutating the original pointee
+// or silently sending a base64 string where the peer expects a binary buffer.
+func hasUnsupportedBinaryEmbedding(rv reflect.Value, depth int) bool {
+	if depth <= 0 || !rv.IsValid() || ownsEncoding(rv) {
+		return false
+	}
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		return !rv.IsNil() && hasUnsupportedBinaryEmbedding(rv.Elem(), depth-1)
+	case reflect.Slice, reflect.Array:
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			return false
+		}
+		for i := 0; i < rv.Len(); i++ {
+			if hasUnsupportedBinaryEmbedding(rv.Index(i), depth-1) {
+				return true
+			}
+		}
+	case reflect.Map:
+		for _, key := range rv.MapKeys() {
+			if hasUnsupportedBinaryEmbedding(rv.MapIndex(key), depth-1) {
+				return true
+			}
+		}
+	case reflect.Struct:
+		for i := 0; i < rv.NumField(); i++ {
+			field := rv.Type().Field(i)
+			fv := rv.Field(i)
+			skip, omitempty := jsonFieldOptions(field)
+			if !jsonVisibleField(field) || skip || (omitempty && isEmptyValue(fv)) {
+				continue
+			}
+			if field.PkgPath != "" && fv.Kind() == reflect.Pointer && reflectHasBinary(fv, depth-1) {
+				return true
+			}
+			if hasUnsupportedBinaryEmbedding(fv, depth-1) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // sentinelSlice records rv's bytes under a unique sentinel and returns a
@@ -567,6 +666,14 @@ func indexComma(s string) int {
 func (p *SocketIOV5DefaultParser) SerializeBinary(msg *socketio_v5.Message) ([]byte, [][]byte, error) {
 	if msg == nil || msg.Event == nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrParseBinary, errors.New("empty event"))
+	}
+	if err := p.validateMessage(msg); err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrParseBinary, err)
+	}
+	if p.payloadParser != nil {
+		if _, ok := p.payloadParser.(BinaryPayloadParser); !ok {
+			return nil, nil, fmt.Errorf("%w: custom payload parser does not support binary attachments", ErrParseBinary)
+		}
 	}
 
 	// Map the requested text type onto its binary counterpart so callers may

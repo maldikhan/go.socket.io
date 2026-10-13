@@ -9,6 +9,13 @@ type PayloadParser interface {
 	WrapCallback(callback interface{}) func(in []interface{})
 }
 
+// BinaryPayloadParser is an optional capability of a custom PayloadParser.
+// Reconstruction and WrapCallback must agree on the representation of binary
+// values, which differs from a text-only parser's raw JSON byte slices.
+type BinaryPayloadParser interface {
+	ReconstructBinary(msg *socketio_v5.Message, attachments [][]byte) error
+}
+
 type Logger interface {
 	Debugf(format string, args ...interface{})
 	Errorf(format string, args ...interface{})
