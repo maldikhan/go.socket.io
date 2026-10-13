@@ -268,7 +268,9 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 func (c *Client) connect(ctx context.Context) error {
+	c.transportMu.Lock()
 	c.ctx = ctx
+	c.transportMu.Unlock()
 	// Mark the client as live so that an unexpected transport drop triggers a
 	// reconnect rather than being mistaken for an intentional Close.
 	atomic.StoreUint32(&c.closing, 0)
@@ -578,7 +580,7 @@ func (c *Client) transportUpgrade(transport Transport) error {
 	// A reconnect attempt that timed out has already torn this cycle down (and
 	// owns the transportClosed drain); a late upgrade must not stop/replace the
 	// transport or compete for the close notification.
-	if atomic.LoadUint32(&c.cycleAbandoned) == 1 {
+	if atomic.LoadUint32(&c.cycleAbandoned) == 1 || atomic.LoadUint32(&c.closing) == 1 || c.transport == nil {
 		return failUpgrade(errClientClosed)
 	}
 
@@ -894,15 +896,24 @@ func (c *Client) Send(message []byte) error {
 }
 
 func (c *Client) waitForGate(gate <-chan struct{}) error {
+	if atomic.LoadUint32(&c.closing) == 1 {
+		return errClientClosed
+	}
+	c.transportMu.RLock()
+	ctx := c.ctx
+	c.transportMu.RUnlock()
 	var ctxDone <-chan struct{}
-	if c.ctx != nil {
-		ctxDone = c.ctx.Done()
+	if ctx != nil {
+		ctxDone = ctx.Done()
 	}
 	select {
 	case <-c.closeCh:
 		return errClientClosed
 	case <-ctxDone:
-		return c.ctx.Err()
+		if atomic.LoadUint32(&c.closing) == 1 {
+			return errClientClosed
+		}
+		return ctx.Err()
 	case <-gate:
 		return nil
 	}
@@ -1063,14 +1074,21 @@ func (c *Client) Close() error {
 func (c *Client) SendBinary(message []byte) error {
 	c.transportMu.RLock()
 	wh := c.waitHandshake
-	wu := c.waitUpgrade
 	c.transportMu.RUnlock()
 
 	if wh != nil {
-		<-wh
+		if err := c.waitForGate(wh); err != nil {
+			return err
+		}
 	}
+	// The handshake may have published an upgrade gate while Send waited.
+	c.transportMu.RLock()
+	wu := c.waitUpgrade
+	c.transportMu.RUnlock()
 	if wu != nil {
-		<-wu
+		if err := c.waitForGate(wu); err != nil {
+			return err
+		}
 	}
 
 	c.transportMu.RLock()
