@@ -160,7 +160,11 @@ func TestNewClient(t *testing.T) {
 			}
 
 			// Common fields check
-			assert.Equal(t, got.url, tt.want.url)
+			expectedURL := *tt.want.url
+			query := expectedURL.Query()
+			query.Set("EIO", "4")
+			expectedURL.RawQuery = query.Encode()
+			assert.Equal(t, &expectedURL, got.url)
 			assert.IsType(t, got.log, tt.want.log)
 			assert.IsType(t, got.parser, tt.want.parser)
 			assert.Equal(t, got.reconnectAttempts, tt.want.reconnectAttempts)

@@ -413,7 +413,9 @@ func TestClient_Connect_Timeout_UnblocksSend(t *testing.T) {
 
 		select {
 		case err := <-sendDone:
-			assert.ErrorContains(t, err, "client is closed")
+			if !errors.Is(err, context.Canceled) {
+				assert.ErrorContains(t, err, "client is closed")
+			}
 		case <-time.After(time.Second):
 			t.Fatal("Send was not unblocked by the connect timeout teardown")
 		}

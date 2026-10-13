@@ -4,7 +4,7 @@ A Go implementation of the Socket.IO v5 client, compatible with Socket.IO v4 ser
 
 ![logo](https://github.com/user-attachments/assets/f2fd04b7-044d-4b78-88da-2f260ca24859)
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/maldikhan/go.socket.io/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/maldikhan/go.socket.io/blob/master/LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/maldikhan/go.socket.io#latest)](https://goreportcard.com/report/github.com/maldikhan/go.socket.io)
 [![codecov](https://codecov.io/github/maldikhan/go.socket.io/graph/badge.svg?token=HQTEDRMY81)](https://codecov.io/github/maldikhan/go.socket.io)
 [![Go Reference](https://pkg.go.dev/badge/github.com/maldikhan/go.socket.io.svg)](https://pkg.go.dev/github.com/maldikhan/go.socket.io)  
@@ -13,9 +13,9 @@ A Go implementation of the Socket.IO v5 client, compatible with Socket.IO v4 ser
 [![Sec](https://github.com/maldikhan/go.socket.io/actions/workflows/security.yaml/badge.svg)](https://github.com/maldikhan/go.socket.io/actions/workflows/security.yaml)
 [![CodeQL](https://github.com/maldikhan/go.socket.io/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/maldikhan/go.socket.io/actions/workflows/github-code-scanning/codeql)
 
-This library implements a zero side dependency client compatible with the Socket.IO v5 protocol and Engine.IO v4 protocol. It supports WebSocket and HTTP long-polling transports, as well as the authorization mechanism introduced in Socket.IO v5.
+This library implements a modular client compatible with the Socket.IO v5 protocol and Engine.IO v4 protocol. It supports WebSocket and HTTP long-polling transports, as well as the authorization mechanism introduced in Socket.IO v5.
 
-**Note: This is a preview version implementing the core functionality of the protocols. It's in an early stage of testing and may not be suitable for production use.**
+Version 0.2.0 adds automatic reconnection, binary events and acknowledgements, independent connection timeouts, and an optional maintained WebSocket backend. See [CHANGELOG.md](CHANGELOG.md) for migration notes.
 
 ## Table of Contents
 
@@ -87,14 +87,18 @@ More usage examples can be found in the [examples](https://github.com/maldikhan/
 - Engine.IO v4 protocol support
 - WebSocket and HTTP long-polling transports
 - Authorization support
-- Namespaces support (limited)
+- Configurable default namespace
+- Binary events and acknowledgements over both transports
+- Automatic reconnection with bounded exponential backoff
+- Connection timeout independent of session lifetime
+- Optional maintained WebSocket backend with compression and read limits
 - Concurrency-safe client (all public methods are goroutine-safe)
 - Modular design for easy component replacement
 - Fast JSON parsing with jsoniter (with [custom parser](https://github.com/maldikhan/go.socket.io-parser.jsoniter))
 
 ## Requirements
 
-- Go 1.21 or later
+- Go 1.26.0 or later; use the latest security patch for your Go release.
 
 ## Installation
 
@@ -134,10 +138,10 @@ ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 defer cancel()
 
 err := client.Connect(ctx, 
-    func() {
+    func(_ interface{}) {
         fmt.Println("Connected to the server!")
     },
-    func() {
+    func(_ interface{}) {
         fmt.Println("This is another on-connect callback")
     },
 )
@@ -308,8 +312,10 @@ err := client.Close()
 - `WithTransport(Transport)`: Use a specific transport
 - `WithSupportedTransports([]Transport)`: Set supported transports
 - `WithParser(Parser)`: Use a custom parser
+- `WithReconnect(bool)`: Enable/disable automatic reconnection (enabled by default)
 - `WithReconnectAttempts(int)`: Set the number of reconnect attempts
-- `WithReconnectWait(time.Duration)`: Set the wait time between reconnect attempts
+- `WithReconnectWait(time.Duration)`: Set the base wait; retries double up to 8 times this duration
+- `WithOnReconnecting(func())`, `WithOnReconnect(func())`, `WithOnReconnectFailed(func())`: Register lifecycle hooks
 - `WithConnectTimeout(time.Duration)`: Limit the duration of the connection phase only (see [Connect timeout](#connect-timeout))
 
 ### Connect timeout
@@ -444,11 +450,16 @@ The following may be called concurrently from multiple goroutines:
 
 ## Limitations
 
-- Binary packets are not currently supported
-- Reconnection functionality is not yet implemented (TBD)
-- Full namespace support is not yet implemented (TBD)
-- Synthetic events like reconnect/reconnect_error are not implemented yet (TBD)
-- Contract is stable but may be extended in future releases, please follow socket.io limitations for event naming
+- Reconnection establishes a new session and rejoins the configured default
+  namespace. Events and acknowledgements from the previous session are not
+  replayed; applications should use their own delivery IDs when replay is needed.
+- `WithConnectTimeout` bounds the Engine.IO handshake and transport upgrade.
+  Wait for the Socket.IO `connect` event before treating a namespace as ready.
+- Custom parsers must explicitly support binary reconstruction to receive binary
+  events. Text-only custom parsers retain their serialization behavior.
+- Use the default namespace option for a custom namespace. Multiplexing several
+  independently configured namespaces through one client is not a public API.
+- Handlers run concurrently. Applications must synchronize their shared state.
 
 ## Contributing
 

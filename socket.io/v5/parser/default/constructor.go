@@ -1,6 +1,7 @@
 package socketio_v5_parser_default
 
 import (
+	"errors"
 	"github.com/maldikhan/go.socket.io/utils"
 )
 
@@ -10,6 +11,9 @@ func NewParser(options ...ParserOption) (*SocketIOV5DefaultParser, error) {
 	parser := &SocketIOV5DefaultParser{}
 
 	for _, option := range options {
+		if option == nil {
+			return nil, errors.New("nil parser option")
+		}
 		if err := option(parser); err != nil {
 			return nil, err
 		}

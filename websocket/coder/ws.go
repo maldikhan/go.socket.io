@@ -44,6 +44,9 @@ type Option func(*WebSocketConnection) error
 func New(options ...Option) (*WebSocketConnection, error) {
 	ws := &WebSocketConnection{readLimit: 4 * 1024 * 1024}
 	for _, option := range options {
+		if option == nil {
+			return nil, errors.New("nil WebSocket option")
+		}
 		if err := option(ws); err != nil {
 			return nil, err
 		}
