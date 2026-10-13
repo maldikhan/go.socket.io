@@ -1,7 +1,7 @@
 dev-deps:
 	go install github.com/axw/gocov/gocov@latest
 	go install golang.org/x/vuln/cmd/govulncheck@latest
-	go install github.com/securego/gosec/v2/cmd/gosec@latest
+	go install github.com/securego/gosec/v2/cmd/gosec@v2.29.1-0.20261012130337-71577268350e
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 mocks:
 	go generate ./...

@@ -21,25 +21,16 @@ jobs:
           submodules: recursive
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: 'stable'
           check-latest: true
 
-      - name: Cache Go modules and gosec
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-            ~/go/bin
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-gosec
-          restore-keys: |
-            ${{ runner.os }}-go-
-
       - name: Install gosec
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          # gosec v2.29.0 cannot decode Go 1.27 export data (securego/gosec#1774).
+          # Pin the upstream x/tools fix until a compatible tagged release.
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.1-0.20261012130337-71577268350e
 
       - name: Run gosec on main project
         run: |
@@ -65,21 +56,10 @@ jobs:
           submodules: recursive
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: 'stable'
           check-latest: true
-
-      - name: Cache Go modules and gosec
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-            ~/go/bin
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-gosec
-          restore-keys: |
-            ${{ runner.os }}-go-
 
       - name: Install govulncheck
         run: |
