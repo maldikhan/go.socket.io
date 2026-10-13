@@ -22,7 +22,7 @@ func TestRunNotifiesCloseAfterWebSocketCleanup(t *testing.T) {
 	closeStarted := make(chan struct{})
 	allowClose := make(chan struct{})
 	ws.EXPECT().Dial(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
-	ws.EXPECT().Receive(gomock.Any()).Return(errors.New("dropped"))
+	ws.EXPECT().ReceiveFrame(gomock.Any()).Return(false, errors.New("dropped"))
 	ws.EXPECT().Close().DoAndReturn(func() error {
 		close(closeStarted)
 		<-allowClose

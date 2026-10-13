@@ -3,7 +3,6 @@ package engineio_v4_client
 import (
 	"context"
 	"errors"
-	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -59,7 +58,7 @@ func TestTransportCallbackCanClose(t *testing.T) {
 			client.On(event, func([]byte) { returned <- client.Close() })
 			loopDone := client.messagesDone
 			go client.messageLoop(client.ctx, messages, loopDone, nil)
-			messages <- []byte("packet")
+			messages <- engineio_v4.Frame{Data: []byte("packet")}
 			select {
 			case err := <-returned:
 				require.NoError(t, err)
