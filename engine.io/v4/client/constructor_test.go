@@ -160,7 +160,11 @@ func TestNewClient(t *testing.T) {
 			}
 
 			// Common fields check
-			assert.Equal(t, got.url, tt.want.url)
+			expectedURL := *tt.want.url
+			query := expectedURL.Query()
+			query.Set("EIO", "4")
+			expectedURL.RawQuery = query.Encode()
+			assert.Equal(t, &expectedURL, got.url)
 			assert.IsType(t, got.log, tt.want.log)
 			assert.IsType(t, got.parser, tt.want.parser)
 			assert.Equal(t, got.reconnectAttempts, tt.want.reconnectAttempts)
@@ -395,4 +399,56 @@ func TestWithReconnectWait(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWithReconnect(t *testing.T) {
+	client := &Client{}
+
+	assert.NoError(t, WithReconnect(false)(client))
+	assert.False(t, client.reconnect)
+
+	assert.NoError(t, WithReconnect(true)(client))
+	assert.True(t, client.reconnect)
+}
+
+func TestWithReconnectHooks(t *testing.T) {
+	t.Run("WithOnReconnecting", func(t *testing.T) {
+		client := &Client{}
+		assert.NoError(t, WithOnReconnecting(func() {})(client))
+		assert.NotNil(t, client.reconnectingHandler)
+	})
+
+	t.Run("WithOnReconnect", func(t *testing.T) {
+		client := &Client{}
+		assert.NoError(t, WithOnReconnect(func() {})(client))
+		assert.NotNil(t, client.reconnectHandler)
+	})
+
+	t.Run("WithOnReconnectFailed", func(t *testing.T) {
+		client := &Client{}
+		assert.NoError(t, WithOnReconnectFailed(func() {})(client))
+		assert.NotNil(t, client.reconnectFailedHand)
+	})
+
+	t.Run("default reconnect enabled", func(t *testing.T) {
+		client, err := NewClient(WithRawURL("http://example.com"))
+		require.NoError(t, err)
+		assert.True(t, client.reconnect, "reconnect must default to true")
+	})
+}
+
+func TestWithURLRetainsCallerURL(t *testing.T) {
+	original, err := url.Parse("wss://example.com/socket.io/?token=example")
+	require.NoError(t, err)
+	before := original.String()
+	client := &Client{}
+	require.NoError(t, WithURL(original)(client))
+	assert.Equal(t, before, original.String())
+	assert.Equal(t, "https", client.url.Scheme)
+	assert.Equal(t, "example", client.url.Query().Get("token"))
+	assert.Equal(t, "4", client.url.Query().Get("EIO"))
+	assert.NotSame(t, original, client.url)
+	require.Error(t, WithURL(nil)(client))
+	_, err = NewClient(nil)
+	require.Error(t, err)
 }

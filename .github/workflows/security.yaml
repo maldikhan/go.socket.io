@@ -21,27 +21,16 @@ jobs:
           submodules: recursive
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: 'stable'
           check-latest: true
 
-      - name: Cache Go modules and gosec
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-            ~/go/bin
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-gosec
-          restore-keys: |
-            ${{ runner.os }}-go-
-
       - name: Install gosec
         run: |
-          if ! command -v gosec &> /dev/null; then
-            go install github.com/securego/gosec/v2/cmd/gosec@latest
-          fi
+          # gosec v2.29.0 cannot decode Go 1.27 export data (securego/gosec#1774).
+          # Pin the upstream x/tools fix until a compatible tagged release.
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.1-0.20261012130337-71577268350e
 
       - name: Run gosec on main project
         run: |
@@ -52,7 +41,7 @@ jobs:
         if: github.event_name != 'pull_request' && github.actor != 'nektos/act'
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: ./
+          sarif_file: gosec.main.sarif
 
       - name: Display SARIF results
         if: github.actor == 'nektos/act'
@@ -67,27 +56,14 @@ jobs:
           submodules: recursive
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: 'stable'
           check-latest: true
 
-      - name: Cache Go modules and gosec
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-            ~/go/bin
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-gosec
-          restore-keys: |
-            ${{ runner.os }}-go-
-
       - name: Install govulncheck
         run: |
-          if ! command -v govulncheck &> /dev/null; then
-            go install golang.org/x/vuln/cmd/govulncheck@latest
-          fi
+          go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Run govulncheck on main project
         run: |

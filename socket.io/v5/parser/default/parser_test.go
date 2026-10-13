@@ -36,6 +36,20 @@ func TestSocketIOV5DefaultParser_Parse(t *testing.T) {
 			wantErr: ErrParsePackage,
 		},
 		{
+			// A binary header with the attachment count but no payload after it
+			// must be rejected, not panic in extractNamespace on empty input.
+			name:    "Truncated binary event header",
+			input:   []byte("51-"),
+			want:    nil,
+			wantErr: ErrParsePackage,
+		},
+		{
+			name:    "Truncated binary ack header",
+			input:   []byte("61-"),
+			want:    nil,
+			wantErr: ErrParsePackage,
+		},
+		{
 			name:  "Connect message",
 			input: []byte("0"),
 			want: &socketio_v5.Message{
@@ -102,13 +116,24 @@ func TestSocketIOV5DefaultParser_Parse(t *testing.T) {
 			wantErr: ErrParseEvent,
 		},
 		{
+			name:    "Binary event without attachment count",
+			input:   []byte("5"),
+			want:    nil,
+			wantErr: ErrParsePackage,
+		},
+		{
 			name:  "Binary event message",
-			input: []byte("5"),
+			input: []byte(`51-["binEvent",{"_placeholder":true,"num":0}]`),
 			want: &socketio_v5.Message{
-				Type: socketio_v5.PacketBinaryEvent,
-				NS:   "/",
+				Type:              socketio_v5.PacketBinaryEvent,
+				NS:                "/",
+				BinaryAttachments: intPtr(1),
+				Event: &socketio_v5.Event{
+					Name:     "binEvent",
+					Payloads: []interface{}{json.RawMessage(`{"_placeholder":true,"num":0}`)},
+				},
 			},
-			wantErr: ErrParseEventUnsupported,
+			wantErr: nil,
 		},
 		{
 			name:  "Connect error message",
@@ -147,13 +172,9 @@ func TestSocketIOV5DefaultParser_Parse(t *testing.T) {
 			wantErr: ErrParsePackage,
 		},
 		{
-			name:  "Message with empty payload",
-			input: []byte(`2`),
-			want: &socketio_v5.Message{
-				Type: socketio_v5.PacketEvent,
-				NS:   "/",
-			},
-			wantErr: nil,
+			name:    "Message with empty payload",
+			input:   []byte(`2`),
+			wantErr: ErrParsePackage,
 		},
 		{
 			name:    "Message with invalid JSON payload",
@@ -163,9 +184,10 @@ func TestSocketIOV5DefaultParser_Parse(t *testing.T) {
 		},
 	}
 
-	parser := NewParser(
+	parser, err := NewParser(
 		WithLogger(logger),
 	)
+	require.NoError(t, err)
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
@@ -355,9 +377,10 @@ func TestSocketIOV5DefaultParser_parseEvent(t *testing.T) {
 		},
 	}
 
-	parser := NewParser(
+	parser, err := NewParser(
 		WithLogger(logger),
 	)
+	require.NoError(t, err)
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
@@ -400,14 +423,15 @@ func TestSocketIOV5DefaultParser_parseEvent(t *testing.T) {
 		mockPayloadParser := mock_socketio_v5_parser_default.NewMockPayloadParser(ctrl)
 		defer ctrl.Finish()
 
-		parser := NewParser(
+		parser, err := NewParser(
 			WithLogger(logger),
 			WithPayloadParser(mockPayloadParser),
 		)
+		require.NoError(t, err)
 
 		mockPayloadParser.EXPECT().ParseEvent([]byte("123"), false).Return(&socketio_v5.Event{}, nil)
 
-		_, err := parser.ParseEvent([]byte("123"), false)
+		_, err = parser.ParseEvent([]byte("123"), false)
 		assert.Nil(t, err)
 	})
 }
@@ -639,9 +663,10 @@ func TestSocketIOV5DefaultParser_Serialize(t *testing.T) {
 			want: []byte("344[]"),
 		},
 	}
-	parser := NewParser(
+	parser, err := NewParser(
 		WithLogger(logger),
 	)
+	require.NoError(t, err)
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
@@ -663,9 +688,10 @@ func TestThreadSafety(t *testing.T) {
 		Arg int `json:"arg"`
 	}
 
-	parser := NewParser(
+	parser, err := NewParser(
 		WithLogger(logger),
 	)
+	require.NoError(t, err)
 
 	callback := parser.WrapCallback(func(arg *E, z []int) {
 		assert.Equal(t, []int{11, 12, 13}, z)
@@ -694,9 +720,10 @@ func TestWrapCallback(t *testing.T) {
 	event, err := json.Marshal(typedEvent)
 	assert.NoError(t, err)
 
-	parser := NewParser(
+	parser, err := NewParser(
 		WithLogger(logger),
 	)
+	require.NoError(t, err)
 
 	t.Run(fmt.Sprintf("%T-%s", parser, "json"), func(t *testing.T) {
 		t.Parallel()
@@ -843,9 +870,10 @@ func TestMsgSerializeRestore(t *testing.T) {
 		},
 	}
 
-	parser := NewParser(
+	parser, err := NewParser(
 		WithLogger(logger),
 	)
+	require.NoError(t, err)
 
 	for _, tt := range tests {
 		tt := tt
@@ -935,4 +963,46 @@ var typedEvent = []interface{}{
 		E: "e",
 	},
 	[]string{"a", "b", "c"},
+}
+
+// TestWrapCallback_VariadicNoPayload verifies that a variadic handler — the
+// natural shape for reserved lifecycle events ("reconnect", "reconnecting",
+// "reconnect_failed"), which are dispatched with no payload — is invoked with
+// an empty argument list instead of being rejected by the arity check.
+func TestWrapCallback_VariadicNoPayload(t *testing.T) {
+	t.Parallel()
+	parser, _ := NewParser(WithLogger(logger))
+
+	t.Run("variadic only, nil payload", func(t *testing.T) {
+		t.Parallel()
+		called := false
+		callback := parser.WrapCallback(func(args ...interface{}) {
+			assert.Empty(t, args)
+			called = true
+		})
+		callback(nil)
+		assert.True(t, called, "variadic handler must fire for a no-payload event")
+	})
+
+	t.Run("fixed plus variadic still requires the fixed args", func(t *testing.T) {
+		t.Parallel()
+		called := false
+		callback := parser.WrapCallback(func(_ string, _ ...interface{}) {
+			called = true
+		})
+		callback(nil)
+		assert.False(t, called, "missing fixed arguments must still be rejected")
+	})
+
+	t.Run("fixed plus variadic with exactly the fixed args", func(t *testing.T) {
+		t.Parallel()
+		called := false
+		callback := parser.WrapCallback(func(s string, rest ...interface{}) {
+			assert.Equal(t, "hello", s)
+			assert.Empty(t, rest)
+			called = true
+		})
+		callback([]interface{}{json.RawMessage(`"hello"`)})
+		assert.True(t, called)
+	})
 }

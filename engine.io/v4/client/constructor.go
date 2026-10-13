@@ -22,13 +22,29 @@ func NewClient(options ...EngineClientOption) (*Client, error) {
 		parser:            &engineio_v4_parser.EngineIOV4Parser{},
 		reconnectAttempts: 5,
 		reconnectWait:     5 * time.Second,
-		pingInterval:      time.NewTicker(10 * time.Second),
-		stopPooling:       make(chan struct{}, 1),
-		transportClosed:   make(chan error, 1),
-		redactPayload:     true, // production-safe default; WithDebugPayload(true) opts out
+		// Reconnection is enabled by default to match the behaviour of the
+		// reference JavaScript client. WithReconnect(false) restores the
+		// pre-reconnect behaviour (the client stops on the first drop).
+		reconnect:       true,
+		pingInterval:    time.NewTicker(10 * time.Second),
+		stopPooling:     make(chan struct{}, 1),
+		transportClosed: make(chan error, 1),
+		// closeCh is closed by Close() to wake the reconnect backoff wait promptly.
+		closeCh:       make(chan struct{}),
+		redactPayload: true, // production-safe default; WithDebugPayload(true) opts out
 	}
 
+	configured := false
+	defer func() {
+		if !configured {
+			client.pingInterval.Stop()
+		}
+	}()
+
 	for _, opt := range options {
+		if opt == nil {
+			return nil, errors.New("nil engine client option")
+		}
 		if err := opt(client); err != nil {
 			return nil, err
 		}
@@ -71,11 +87,17 @@ func NewClient(options ...EngineClientOption) (*Client, error) {
 		}
 	}
 
+	configured = true
 	return client, nil
 }
 
-func WithURL(url *url.URL) EngineClientOption {
+func WithURL(input *url.URL) EngineClientOption {
 	return func(c *Client) error {
+		if input == nil {
+			return errors.New("URL is nil")
+		}
+		copyURL := *input
+		url := &copyURL
 
 		switch url.Scheme {
 		case "http", "https":
@@ -155,11 +177,61 @@ func WithReconnectWait(wait time.Duration) EngineClientOption {
 	}
 }
 
+// WithReconnect enables or disables automatic reconnection with exponential
+// backoff. It is enabled by default; passing false makes the client stop on the
+// first unexpected transport drop, exactly as it behaved before reconnection
+// was added.
+func WithReconnect(enabled bool) EngineClientOption {
+	return func(c *Client) error {
+		c.reconnect = enabled
+		return nil
+	}
+}
+
+// WithOnReconnecting registers a hook fired when an unexpected drop is detected
+// and the client begins its reconnect attempts. Equivalent to
+// On("reconnecting", ...).
+func WithOnReconnecting(handler func()) EngineClientOption {
+	return func(c *Client) error {
+		c.reconnectingHandler = handler
+		return nil
+	}
+}
+
+// WithOnReconnect registers a hook fired after the client successfully
+// re-establishes the connection. Equivalent to On("reconnect", ...).
+func WithOnReconnect(handler func()) EngineClientOption {
+	return func(c *Client) error {
+		c.reconnectHandler = handler
+		return nil
+	}
+}
+
+// WithOnReconnectFailed registers a hook fired when all reconnect attempts are
+// exhausted (the client is then closed). Equivalent to
+// On("reconnect_failed", ...).
+func WithOnReconnectFailed(handler func()) EngineClientOption {
+	return func(c *Client) error {
+		c.reconnectFailedHand = handler
+		return nil
+	}
+}
+
 // WithDebugPayload enables logging of raw packet payloads at debug level.
 // It is disabled by default so production logs do not leak message contents.
 func WithDebugPayload(enabled bool) EngineClientOption {
 	return func(c *Client) error {
 		c.redactPayload = !enabled
+		return nil
+	}
+}
+
+func WithConnectTimeout(timeout time.Duration) EngineClientOption {
+	return func(c *Client) error {
+		if timeout <= 0 {
+			return fmt.Errorf("connect timeout must be positive, got %s", timeout)
+		}
+		c.connectTimeout = timeout
 		return nil
 	}
 }

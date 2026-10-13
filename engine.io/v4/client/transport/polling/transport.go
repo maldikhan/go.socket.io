@@ -3,6 +3,7 @@ package engineio_v4_client_transport
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -11,9 +12,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	// Note: we use atomic.LoadUint32/StoreUint32 instead of atomic.Bool
-	// to maintain compatibility with Go 1.18 (atomic.Bool requires Go 1.19).
 
 	engineio_v4 "github.com/maldikhan/go.socket.io/engine.io/v4"
 )
@@ -24,6 +22,20 @@ import (
 // context.Canceled before it can reach public API callers.
 var errTransportStopped = errors.New("transport stopped")
 
+// pollStatusError reports a non-2xx polling response. Client-level (4xx)
+// rejections are fatal: the server refused the session itself (e.g. a 400
+// "Session ID unknown" after a server restart), so retrying with the same sid
+// can never succeed — the loop must stop and surface the drop to the engine
+// client's reconnect supervisor instead of polling the dead session forever.
+// Server-level (5xx) responses are treated as transient and retried.
+type pollStatusError struct{ status int }
+
+func (e *pollStatusError) Error() string {
+	return fmt.Sprintf("unexpected polling response status %d", e.status)
+}
+
+func (e *pollStatusError) fatal() bool { return e.status >= 400 && e.status < 500 }
+
 type Transport struct {
 	log        Logger
 	httpClient HttpClient
@@ -33,7 +45,7 @@ type Transport struct {
 	sid string
 	ctx context.Context
 
-	messages    chan<- []byte
+	messages    chan<- engineio_v4.Frame
 	onClose     chan<- error
 	stopPooling chan struct{}
 
@@ -60,7 +72,7 @@ type Transport struct {
 	stopCh   chan struct{}
 	stopOnce sync.Once
 
-	stopped        uint32 // atomic; 0 = running, 1 = stopped
+	stopped        atomic.Bool // false = running, true = stopped
 	maxPayloadSize int64
 
 	// pollErrorBackoff is the pause after a failed poll before retrying, so a
@@ -136,7 +148,7 @@ func (c *Transport) Run(
 	ctx context.Context,
 	url *url.URL,
 	sid string,
-	messagesChan chan<- []byte,
+	messagesChan chan<- engineio_v4.Frame,
 	onClose chan<- error,
 ) error {
 	c.ctx = ctx
@@ -158,7 +170,7 @@ func (c *Transport) Run(
 	c.messages = messagesChan
 	c.onClose = onClose
 	// Reset the stop state so the transport can be safely reused after a Stop().
-	atomic.StoreUint32(&c.stopped, 0)
+	c.stopped.Store(false)
 	// Reinitialize stopPooling channel to ensure fresh channel for new run.
 	c.stopPooling = make(chan struct{}, 1)
 	// Reinitialize the stop broadcast channel and its sync.Once as well —
@@ -173,7 +185,9 @@ func (c *Transport) Run(
 		if err != nil {
 			c.log.Errorf("pollingLoop error: %s", err)
 		}
-		// TODO: reconnect
+		// Reconnection is handled at the engine.io Client level: finishPolling
+		// reports the drop via onClose, and the client's reconnect supervisor
+		// performs a fresh handshake. The transport does not reconnect itself.
 	}()
 
 	return nil
@@ -182,7 +196,7 @@ func (c *Transport) Run(
 func (c *Transport) Stop() error {
 	// CAS ensures only one concurrent Stop() call proceeds;
 	// subsequent calls see stopped==1 and return immediately.
-	if !atomic.CompareAndSwapUint32(&c.stopped, 0, 1) {
+	if !c.stopped.CompareAndSwap(false, true) {
 		return nil
 	}
 	// Close stopCh to broadcast the stop signal to any poll() call that is
@@ -249,11 +263,25 @@ func (c *Transport) pollingLoop() error {
 		if err != nil {
 			// A request cancelled by Stop() (reqCtx) or by the parent context is
 			// a normal shutdown, not a transport error.
-			if atomic.LoadUint32(&c.stopped) == 1 {
+			if c.stopped.Load() {
 				return c.finishPolling(true, nil)
 			}
 			if c.ctx.Err() != nil {
 				return c.finishPolling(false, c.ctx.Err())
+			}
+			// A 4xx response means the server rejected the session itself (e.g.
+			// "Session ID unknown" after a restart): retrying the same sid can
+			// never succeed. Stop the loop and report the drop with the actual
+			// error so the engine client's reconnect supervisor starts a fresh
+			// session instead of this loop polling a dead sid forever.
+			var statusErr *pollStatusError
+			if errors.As(err, &statusErr) && statusErr.fatal() {
+				c.log.Errorf("fatal poll error, stopping transport: %s", err)
+				c.stopped.Store(true)
+				if c.onClose != nil {
+					c.onClose <- err
+				}
+				return err
 			}
 			// Genuine transient error (network blip, server hiccup): log and back
 			// off briefly, but stay responsive to stop/cancel during the pause.
@@ -279,7 +307,7 @@ func (c *Transport) finishPolling(stopRequested bool, ret error) error {
 	} else {
 		c.log.Debugf("context done, stop http polling")
 	}
-	atomic.StoreUint32(&c.stopped, 1)
+	c.stopped.Store(true)
 	if c.onClose != nil {
 		c.onClose <- c.ctx.Err()
 	}
@@ -338,7 +366,7 @@ func (c *Transport) poll() error {
 	// forwarding the error body as an engine.io packet and hot-spinning.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("unexpected polling response status %d", resp.StatusCode)
+		return &pollStatusError{status: resp.StatusCode}
 	}
 
 	// Limit payload size to guard against OOM from a malicious/buggy server.
@@ -366,21 +394,63 @@ func (c *Transport) poll() error {
 
 	c.log.Debugf("receiveHttp: %s", c.payload(body))
 
-	select {
-	case c.messages <- body:
-	case <-c.ctx.Done():
-		return c.ctx.Err()
-	case <-c.stopCh:
-		// Stop() was called while we were blocked sending. stopCh is a closed
-		// channel (broadcast), so pollingLoop's own stopPooling case remains
-		// intact — it will still exit cleanly via the value Stop() enqueued.
-		return errTransportStopped
+	// A long-polling body may carry several engine.io packets joined by the
+	// record separator (U+001E). Split here, at the transport that owns the
+	// long-polling framing, and deliver one packet per frame. The WebSocket
+	// transport already frames each packet on its own, so the separator never
+	// leaks into the engine.io client.
+	for _, record := range splitRecords(body) {
+		if len(record) == 0 {
+			continue
+		}
+		select {
+		case c.messages <- engineio_v4.Frame{Data: record}:
+		case <-c.ctx.Done():
+			return c.ctx.Err()
+		case <-c.stopCh:
+			// Stop() was called while we were blocked sending. stopCh is a closed
+			// channel (broadcast), so pollingLoop's own stopPooling case remains
+			// intact — it will still exit cleanly via the value Stop() enqueued.
+			return errTransportStopped
+		}
 	}
 	return nil
 }
 
-func (c *Transport) SendMessage(msg []byte) error {
+// recordSeparator is the engine.io v4 payload delimiter (U+001E) that joins
+// multiple packets inside a single HTTP long-polling body.
+const recordSeparator = '\x1e'
 
+// splitRecords splits a long-polling body on the engine.io record separator. A
+// body without separators yields a single record, so single-packet responses
+// (including every handshake) flow through unchanged.
+func splitRecords(data []byte) [][]byte {
+	var out [][]byte
+	start := 0
+	for i := 0; i < len(data); i++ {
+		if data[i] == recordSeparator {
+			out = append(out, data[start:i])
+			start = i + 1
+		}
+	}
+	return append(out, data[start:])
+}
+
+func (c *Transport) SendMessage(msg []byte) error {
+	return c.post(msg)
+}
+
+// SendBinary POSTs a raw binary attachment encoded as the engine.io v4 base64
+// "b"-record. Over HTTP long-polling binary cannot travel as its own frame, so
+// it is sent as a base64 text record the server decodes back to bytes.
+func (c *Transport) SendBinary(msg []byte) error {
+	encoded := make([]byte, 1, base64.StdEncoding.EncodedLen(len(msg))+1)
+	encoded[0] = 'b'
+	encoded = append(encoded, []byte(base64.StdEncoding.EncodeToString(msg))...)
+	return c.post(encoded)
+}
+
+func (c *Transport) post(msg []byte) error {
 	c.log.Debugf("sendHttp: %s", c.payload(msg))
 	req, err := http.NewRequestWithContext(c.ctx, "POST", c.buildHttpUrl().String(), bytes.NewReader(msg))
 	if err != nil {

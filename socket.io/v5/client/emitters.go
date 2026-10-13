@@ -15,14 +15,16 @@ func (c *Client) Emit(event interface{}, args ...interface{}) error {
 
 func (n *namespace) Emit(event interface{}, args ...interface{}) error {
 
-	if n.waitConnected != nil {
+	// Snapshot the gate under the namespace lock: resetConnectionGate replaces
+	// the channel when a reconnect cycle starts.
+	if waitConnected := n.connectionGate(); waitConnected != nil {
 		// Snapshot ctx under lock to prevent data race
 		n.client.mutex.RLock()
 		ctx := n.client.ctx
 		n.client.mutex.RUnlock()
 
 		select {
-		case <-n.waitConnected:
+		case <-waitConnected:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -148,9 +150,48 @@ func (c *Client) sendPacketWithAckTimeout(
 }
 
 func (c *Client) sendPacket(packet *socketio_v5.Message) error {
+	// Events carrying []byte payloads are sent as a binary packet: a text header
+	// with {"_placeholder"} markers followed by the raw attachment frames.
+	binaryParser, supportsBinary := c.parser.(BinaryParser)
+	if packet.Event != nil && supportsBinary && binaryParser.HasBinary(packet.Event) {
+		binaryEngine, ok := c.engineio.(BinaryEngineIOClient)
+		if !ok {
+			return errors.New("engine.io client does not support binary attachments")
+		}
+		if capability, ok := c.engineio.(interface{ SupportsBinary() bool }); ok && !capability.SupportsBinary() {
+			return errors.New("engine.io transport does not support binary attachments")
+		}
+		header, attachments, err := binaryParser.SerializeBinary(packet)
+		if err != nil {
+			return err
+		}
+		// Serialization happens outside the lock; only the transport writes are
+		// serialized so the header and all of its attachment frames are emitted
+		// contiguously, with no foreign frame interleaved by a concurrent emit.
+		c.sendMu.Lock()
+		defer c.sendMu.Unlock()
+		if err := c.engineio.Send(header); err != nil {
+			return err
+		}
+		for _, attachment := range attachments {
+			if err := binaryEngine.SendBinary(attachment); err != nil {
+				// The peer is waiting for the rest of this packet. Continuing to
+				// write on this session would misassociate subsequent frames or
+				// make every later text event invalid, so terminate the session.
+				_ = c.engineio.Close()
+				return err
+			}
+		}
+		return nil
+	}
+
 	packetData, err := c.parser.Serialize(packet)
 	if err != nil {
 		return err
 	}
+	// Hold sendMu so a single-frame packet cannot slip between a binary
+	// header and its attachment frames emitted by a concurrent binary send.
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 	return c.engineio.Send(packetData)
 }

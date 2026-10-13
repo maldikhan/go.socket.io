@@ -86,11 +86,8 @@ func TestConnect(t *testing.T) {
 
 	mockEngineIO := mocks.NewMockEngineIOClient(ctrl)
 
-	client := &Client{
-		engineio: mockEngineIO,
-	}
-
 	t.Run("Connect", func(t *testing.T) {
+		client := &Client{engineio: mockEngineIO}
 		ctx := context.Background()
 		mockEngineIO.EXPECT().Connect(ctx).Return(nil)
 
@@ -106,6 +103,7 @@ func TestConnect(t *testing.T) {
 	})
 
 	t.Run("Connect with callbacks", func(t *testing.T) {
+		client := &Client{engineio: mockEngineIO}
 		ctx := context.Background()
 		mockEngineIO.EXPECT().Connect(ctx).Return(nil)
 
@@ -234,6 +232,7 @@ func TestConcurrentConnectAndEmit(t *testing.T) {
 	}
 
 	mockEngineIO.EXPECT().Connect(ctx).Return(nil).AnyTimes()
+	mockParser.EXPECT().HasBinary(gomock.Any()).Return(false).AnyTimes()
 	mockParser.EXPECT().Serialize(gomock.Any()).Return([]byte("packet"), nil).AnyTimes()
 	mockEngineIO.EXPECT().Send(gomock.Any()).Return(nil).AnyTimes()
 

@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.18', '1.19', '1.20', '1.21', '1.22', '1.23', '1.24', '1.25', '1.26', 'stable']
+        go-version: ['1.26.x', '1.27.x', 'stable']
       fail-fast: false
 
     steps:
@@ -38,13 +38,13 @@ jobs:
           ${{ runner.os }}-go-${{ matrix.go-version }}-
 
     - name: Get dependencies
-      run: go get -v -t -d ./...
+      run: go mod download
 
     - name: Build
       run: go build -v ./...
 
     - name: Test
-      run: go test -v ./...
+      run: go test -v -timeout=5m ./...
 
     - name: Go vet
       run: go vet -v ./...
@@ -79,7 +79,9 @@ jobs:
         run: go mod download
 
       - name: Run tests for main project
-        run: go test `go list ./...|grep -v mocks` -coverprofile=coverage.out
+        run: |
+          packages=$(go list ./... | grep -v /mocks)
+          go test -race -timeout=5m -coverprofile=coverage.out $packages
 
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v4
@@ -87,19 +89,13 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: |
             ./coverage.out
-            ./coverage.payloadparser.jsoniter.out
           flags: unittests
           fail_ci_if_error: true
 
       - name: Check coverage
         run: |
           total_coverage=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
-          if (( $(echo "$total_coverage < 80" | bc -l) )); then
-            echo "Code coverage is below 80%"
-            exit 1
-          fi
-          total_coverage=$(go tool cover -func=coverage.jsoniter.out | grep total | awk '{print $3}' | sed 's/%//')
-          if (( $(echo "$total_coverage < 80" | bc -l) )); then
-            echo "Code coverage is below 80%"
+          if (( $(echo "$total_coverage < 95" | bc -l) )); then
+            echo "Code coverage is below 95%"
             exit 1
           fi

@@ -2,11 +2,19 @@ package socketio_v5_client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	socketio_v5 "github.com/maldikhan/go.socket.io/socket.io/v5"
 )
+
+// ErrClientClosed is returned when Connect is called after Close.
+var ErrClientClosed = errors.New("socket.io: client is closed")
+
+// ErrConnectAlreadyStarted is returned after the client's one public Connect
+// call has started. Automatic reconnection continues within that session.
+var ErrConnectAlreadyStarted = errors.New("socket.io: Connect has already been called")
 
 type Client struct {
 	engineio EngineIOClient
@@ -14,8 +22,10 @@ type Client struct {
 	logger   Logger
 	timer    Timer
 
-	ctx   context.Context
-	mutex sync.RWMutex
+	ctx            context.Context
+	mutex          sync.RWMutex
+	connectStarted bool
+	closed         bool
 
 	handshakeData map[string]interface{}
 
@@ -24,6 +34,28 @@ type Client struct {
 
 	ackCallbacks map[int]func([]interface{})
 	ackCounter   int
+
+	// sendMu serializes the transport writes that make up a single logical
+	// socket.io packet. A binary event/ack is written as a text header frame
+	// followed by one or more binary attachment frames; without serialization
+	// two concurrent Emit calls could interleave their frames on the wire and
+	// the receiver would associate an attachment with the wrong header. The
+	// lock is held only around the frame writes (see sendPacket), never while
+	// an Emit is blocked waiting for the connection, so it does not serialize
+	// callers that are merely waiting to connect.
+	sendMu sync.Mutex
+
+	// pendingBinary holds a binary event/ack header whose attachment frames have
+	// not all arrived yet. Binary attachments are accumulated in
+	// pendingAttachments and, once the expected count is reached, reassembled
+	// into the message before dispatch. Guarded by binaryMu so staging and the
+	// attachment callbacks never race.
+	binaryMu           sync.Mutex
+	pendingBinary      *socketio_v5.Message
+	pendingNeeded      int
+	pendingBytes       int
+	pendingAttachments [][]byte
+	maxBinarySize      int
 
 	// redactPayload, when true, replaces raw payloads in debug logs with a
 	// size marker. Zero value is verbose; NewClient sets the safe default.
@@ -47,8 +79,53 @@ type namespace struct {
 	handlers    map[string][]func([]interface{})
 	anyHandlers []func(string, []interface{})
 
+	// waitConnected gates Emit until the server acknowledged the namespace
+	// CONNECT: open (blocking) while a CONNECT is outstanding, closed once the
+	// ack arrived. It is re-armed by resetConnectionGate when a reconnect cycle
+	// starts, so post-reconnect emits wait for the re-sent CONNECT to be
+	// acknowledged. Guarded by mu.
 	waitConnected chan struct{}
-	hadConnected  sync.Once
+}
+
+// connectionGate returns the current waitConnected channel (which may be nil
+// for namespaces built without the constructor in tests).
+func (n *namespace) connectionGate() chan struct{} {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.waitConnected
+}
+
+// resetConnectionGate re-arms waitConnected before a reconnect attempt so Emit
+// blocks until the server acknowledges the re-sent CONNECT. Only a closed gate
+// is replaced: replacing an open one would orphan emitters already waiting on
+// it (their CONNECT ack is still the next one to arrive).
+func (n *namespace) resetConnectionGate() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.waitConnected == nil {
+		n.waitConnected = make(chan struct{})
+		return
+	}
+	select {
+	case <-n.waitConnected:
+		n.waitConnected = make(chan struct{})
+	default:
+	}
+}
+
+// openConnectionGate marks the namespace connected, releasing every emitter
+// blocked on the gate. Closing is idempotent so duplicate CONNECT acks are safe.
+func (n *namespace) openConnectionGate() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.waitConnected == nil {
+		return
+	}
+	select {
+	case <-n.waitConnected:
+	default:
+		close(n.waitConnected)
+	}
 }
 
 // SetHandshakeData stores a shallow copy of the provided map as the handshake
@@ -67,6 +144,9 @@ func (c *Client) SetHandshakeData(data map[string]interface{}) {
 }
 
 func (c *Client) connectSocketIO(_ []byte) {
+	c.binaryMu.Lock()
+	c.clearPendingLocked()
+	c.binaryMu.Unlock()
 	c.mutex.RLock()
 	handshakeData := c.handshakeData
 	c.mutex.RUnlock()
@@ -84,6 +164,15 @@ func (c *Client) connectSocketIO(_ []byte) {
 
 func (c *Client) Connect(ctx context.Context, callbacks ...func(arg interface{})) error {
 	c.mutex.Lock()
+	if c.closed {
+		c.mutex.Unlock()
+		return ErrClientClosed
+	}
+	if c.connectStarted {
+		c.mutex.Unlock()
+		return ErrConnectAlreadyStarted
+	}
+	c.connectStarted = true
 	c.ctx = ctx
 	c.mutex.Unlock()
 	for _, callback := range callbacks {
@@ -105,7 +194,6 @@ func (c *Client) namespace(name string) *namespace {
 		name:          name,
 		handlers:      make(map[string][]func([]interface{})),
 		waitConnected: make(chan struct{}),
-		hadConnected:  sync.Once{},
 	}
 	c.namespaces[name] = ns
 	return ns
@@ -123,5 +211,23 @@ func (c *Client) safeGo(fn func()) {
 }
 
 func (c *Client) Close() error {
-	return c.engineio.Close()
+	c.mutex.Lock()
+	c.closed = true
+	c.mutex.Unlock()
+	err := c.engineio.Close()
+	c.binaryMu.Lock()
+	c.clearPendingLocked()
+	c.binaryMu.Unlock()
+	c.mutex.RLock()
+	namespaces := make([]*namespace, 0, len(c.namespaces))
+	for _, ns := range c.namespaces {
+		namespaces = append(namespaces, ns)
+	}
+	c.mutex.RUnlock()
+	// Release emitters parked on an initial or reconnect namespace handshake
+	// after the engine is closed, so their send fails promptly.
+	for _, ns := range namespaces {
+		ns.openConnectionGate()
+	}
+	return err
 }

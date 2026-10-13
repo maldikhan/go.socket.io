@@ -15,12 +15,35 @@ type Parser interface {
 	Serialize(*socketio_v5.Message) ([]byte, error)
 }
 
+// BinaryParser is an optional capability of parsers that use Socket.IO's
+// separate binary attachment frames. Existing custom parsers keep control of
+// their own wire format through Parser.Serialize.
+type BinaryParser interface {
+	// HasBinary reports whether an event carries []byte payloads that must be
+	// sent as a binary packet (PacketBinaryEvent/PacketBinaryAck).
+	HasBinary(event *socketio_v5.Event) bool
+	// SerializeBinary encodes an event with binary payloads into a header packet
+	// plus the ordered binary attachments that follow it on the wire.
+	SerializeBinary(*socketio_v5.Message) (header []byte, attachments [][]byte, err error)
+	// ReconstructBinary substitutes collected binary attachments back into the
+	// placeholders of a parsed binary packet, exposing them as []byte.
+	ReconstructBinary(msg *socketio_v5.Message, attachments [][]byte) error
+}
+
 // EngineIOClient представляет интерфейс для клиента Engine.IO
 type EngineIOClient interface {
 	Connect(ctx context.Context) error
 	Send(message []byte) error
 	On(event string, handler func([]byte))
 	Close() error
+}
+
+// BinaryEngineIOClient is implemented by transports that can send attachment
+// frames. It is optional so existing EngineIOClient implementations remain valid.
+type BinaryEngineIOClient interface {
+	// SendBinary delivers a raw binary attachment frame (the buffers that follow
+	// a binary event/ack header).
+	SendBinary(message []byte) error
 }
 
 // Logger представляет интерфейс для логирования

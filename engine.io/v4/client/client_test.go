@@ -31,20 +31,23 @@ func TestClient_Connect(t *testing.T) {
 	defer cancel()
 
 	testURL, _ := url.Parse("http://localhost")
-	client := &Client{
-		url:                 testURL,
-		log:                 mockLogger,
-		parser:              mockParser,
-		supportedTransports: map[engineio_v4.EngineIOTransport]Transport{engineio_v4.TransportPolling: mockTransport},
-		transport:           mockTransport,
-		messages:            make(chan []byte, 100),
-		transportClosed:     make(chan error, 1),
-		ctx:                 ctx,
+	newClient := func() *Client {
+		return &Client{
+			url:                 testURL,
+			log:                 mockLogger,
+			parser:              mockParser,
+			supportedTransports: map[engineio_v4.EngineIOTransport]Transport{engineio_v4.TransportPolling: mockTransport},
+			transport:           mockTransport,
+			messages:            make(chan engineio_v4.Frame, 100),
+			transportClosed:     make(chan error, 1),
+			ctx:                 ctx,
+		}
 	}
 
 	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
 	t.Run("Successful connect", func(t *testing.T) {
+		client := newClient()
 
 		connected := make(chan struct{}, 1)
 		client.afterConnect = func() { close(connected) }
@@ -61,7 +64,7 @@ func TestClient_Connect(t *testing.T) {
 		mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 		mockTransport.EXPECT().RequestHandshake().DoAndReturn(func() error {
 			go func() {
-				client.messages <- append([]byte{'0'}, respData...)
+				client.messages <- engineio_v4.Frame{Data: append([]byte{'0'}, respData...)}
 			}()
 			return nil
 		})
@@ -102,8 +105,7 @@ func TestClient_Connect(t *testing.T) {
 	})
 
 	t.Run("Transport run error", func(t *testing.T) {
-		// Reset transport after previous Close() nil'd it out.
-		client.transport = mockTransport
+		client := newClient()
 
 		mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(errors.New("run error"))
 		err := client.Connect(ctx)
@@ -116,8 +118,7 @@ func TestClient_Connect(t *testing.T) {
 	})
 
 	t.Run("Handshake request error", func(t *testing.T) {
-		// Reset transport after previous Close() nil'd it out.
-		client.transport = mockTransport
+		client := newClient()
 
 		ctx := context.Background()
 		mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
@@ -152,7 +153,7 @@ func TestClient_messageLoop(t *testing.T) {
 	client := &Client{
 		log:      mockLogger,
 		parser:   mockParser,
-		messages: make(chan []byte, 100),
+		messages: make(chan engineio_v4.Frame, 100),
 		ctx:      ctx,
 	}
 
@@ -161,8 +162,8 @@ func TestClient_messageLoop(t *testing.T) {
 	t.Run("Handle packet", func(t *testing.T) {
 		mockParser.EXPECT().Parse([]byte("test")).Return(&engineio_v4.Message{Type: engineio_v4.PacketMessage}, nil)
 
-		go client.messageLoop(ctx, client.messages)
-		client.messages <- []byte("test")
+		go client.messageLoop(ctx, client.messages, nil, nil)
+		client.messages <- engineio_v4.Frame{Data: []byte("test")}
 		time.Sleep(10 * time.Millisecond)
 	})
 
@@ -170,22 +171,22 @@ func TestClient_messageLoop(t *testing.T) {
 		mockLogger.EXPECT().Errorf(gomock.Any(), gomock.Any()).Times(2)
 		mockParser.EXPECT().Parse([]byte("error")).Return(nil, errors.New("parse error"))
 
-		go client.messageLoop(ctx, client.messages)
-		client.messages <- []byte("error")
+		go client.messageLoop(ctx, client.messages, nil, nil)
+		client.messages <- engineio_v4.Frame{Data: []byte("error")}
 		time.Sleep(10 * time.Millisecond)
 	})
 
 	t.Run("Context done", func(t *testing.T) {
 		mockLogger.EXPECT().Warnf("context done, engine.io client stopped processing messages").AnyTimes()
-		messages := make(chan []byte, 1)
-		go client.messageLoop(ctx, messages)
+		messages := make(chan engineio_v4.Frame, 1)
+		go client.messageLoop(ctx, messages, nil, nil)
 		cancel()
 		time.Sleep(10 * time.Millisecond)
 	})
 
 	t.Run("NIL messages channel", func(t *testing.T) {
 		mockLogger.EXPECT().Errorf("messages channel is nil, can't read transport messages")
-		client.messageLoop(ctx, nil)
+		client.messageLoop(ctx, nil, nil, nil)
 	})
 }
 
@@ -205,7 +206,7 @@ func TestClient_transportUpgrade(t *testing.T) {
 		parser:          mockParser,
 		transport:       mockOldTransport,
 		transportClosed: make(chan error, 1),
-		messages:        make(chan []byte, 100),
+		messages:        make(chan engineio_v4.Frame, 100),
 	}
 
 	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
@@ -949,7 +950,7 @@ func TestClient_Close_stops_ticker(t *testing.T) {
 		log:       mockLogger,
 		parser:    mockParser,
 		transport: mockTransport,
-		messages:  make(chan []byte, 1),
+		messages:  make(chan engineio_v4.Frame, 1),
 	}
 
 	// Create a ticker that we'll verify gets stopped

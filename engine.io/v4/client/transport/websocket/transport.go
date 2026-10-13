@@ -2,6 +2,7 @@ package engineio_v4_client_transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"sync"
@@ -18,9 +19,10 @@ type Transport struct {
 	origin *url.URL
 	ctx    context.Context
 
-	messages    chan<- []byte
+	messages    chan<- engineio_v4.Frame
 	onClose     chan<- error
 	stopPooling chan struct{}
+	readDone    chan struct{}
 	mu          sync.RWMutex
 
 	// redactPayload, when true, replaces raw payloads in debug logs with a
@@ -41,11 +43,14 @@ func (c *Transport) Transport() engineio_v4.EngineIOTransport {
 }
 
 func (c *Transport) Stop() (err error) {
+	c.mu.RLock()
+	stop := c.stopPooling
+	c.mu.RUnlock()
 	// Use non-blocking send: if wsReadLoop already exited (e.g. via
 	// ctx.Done() or a WebSocket error), nobody is reading from
 	// stopPooling and a blocking send would deadlock.
 	select {
-	case c.stopPooling <- struct{}{}:
+	case stop <- struct{}{}:
 	default:
 	}
 	return nil
@@ -55,16 +60,17 @@ func (c *Transport) Run(
 	ctx context.Context,
 	url *url.URL,
 	sid string,
-	messagesChan chan<- []byte,
+	messagesChan chan<- engineio_v4.Frame,
 	onClose chan<- error,
 ) error {
-	c.ctx = ctx
 	c.mu.Lock()
+	c.ctx = ctx
 	c.sid = sid
-	c.mu.Unlock()
 	c.url = url
 	c.messages = messagesChan
 	c.onClose = onClose
+	c.stopPooling = make(chan struct{}, 1)
+	c.mu.Unlock()
 	return c.connectWebSocket()
 }
 
@@ -113,27 +119,49 @@ func (c *Transport) buildWsUrl() *url.URL {
 
 func (c *Transport) connectWebSocket() error {
 	c.log.Debugf("open ws")
+	// Each read loop owns immutable cycle state. Reconnect reuses this
+	// transport, so old loops must never read a newer run's channels/context.
+	c.mu.RLock()
+	cycle := &Transport{
+		log: c.log, ws: c.ws, sid: c.sid, url: c.url, origin: c.origin,
+		ctx: c.ctx, messages: c.messages, stopPooling: c.stopPooling,
+		onClose: make(chan error, 1), redactPayload: c.redactPayload,
+	}
+	onClose := c.onClose
+	c.mu.RUnlock()
 
-	origin := c.origin
+	origin := cycle.origin
 	if origin == nil {
-		origin = c.url
+		origin = cycle.url
 	}
 
-	err := c.ws.Dial(c.ctx, c.buildWsUrl(), origin)
+	err := cycle.ws.Dial(cycle.ctx, cycle.buildWsUrl(), origin)
 	if err != nil {
 		return err
 	}
 
 	go func() {
-		err := c.wsReadLoop()
+		err := cycle.wsReadLoop()
 		if err != nil {
 			c.log.Errorf("wsReadLoop: %s", err)
 		}
-		err = c.ws.Close()
-		if err != nil {
-			c.log.Errorf("wsClose: %s", err)
+		closeErr := cycle.ws.Close()
+		if closeErr != nil {
+			c.log.Errorf("wsClose: %s", closeErr)
 		}
-		// TODO: Reconnect
+		// Close unblocks the in-flight Receive. Wait until it has returned
+		// before allowing a new Dial to replace the shared WebSocket.
+		if cycle.readDone != nil {
+			<-cycle.readDone
+		}
+		select {
+		case onClose <- err:
+		default:
+		}
+		// Reconnection is handled at the engine.io Client level: wsReadLoop
+		// reports the drop (with its error) via onClose, and the client's
+		// reconnect supervisor performs a fresh handshake / transport
+		// re-selection. The transport intentionally does not reconnect itself.
 	}()
 
 	return nil
@@ -149,18 +177,27 @@ func (c *Transport) wsReadLoop() error {
 	// then delivers that error into the buffer (no reader required) and exits.
 	// Only one reader goroutine is ever in flight at a time, so a capacity of 1
 	// is sufficient.
-	messageCh := make(chan []byte, 1)
+	messageCh := make(chan engineio_v4.Frame, 1)
 	errorCh := make(chan error, 1)
 	for {
 		// Run ws read in goroutine
+		readDone := make(chan struct{})
+		c.readDone = readDone
 		go func() {
+			defer close(readDone)
 			var message []byte
-			err := c.ws.Receive(&message)
+			var isBinary bool
+			var err error
+			if binaryWS, ok := c.ws.(BinaryWebSocket); ok {
+				isBinary, err = binaryWS.ReceiveFrame(&message)
+			} else {
+				err = c.ws.Receive(&message)
+			}
 			if err != nil {
 				errorCh <- err
 				return
 			}
-			messageCh <- message
+			messageCh <- engineio_v4.Frame{Data: message, IsBinary: isBinary}
 		}()
 
 		select {
@@ -181,11 +218,11 @@ func (c *Transport) wsReadLoop() error {
 			}
 			return c.ctx.Err()
 
-		case message := <-messageCh:
+		case frame := <-messageCh:
 			// New message received
-			c.log.Debugf("receiveWs: %s", c.payload(message))
+			c.log.Debugf("receiveWs: %s", c.payload(frame.Data))
 			select {
-			case c.messages <- message:
+			case c.messages <- frame:
 			case <-c.stopPooling:
 				c.log.Debugf("Stop signal received, exiting ws read loop")
 				select {
@@ -217,4 +254,28 @@ func (c *Transport) wsReadLoop() error {
 func (c *Transport) SendMessage(msg []byte) error {
 	c.log.Debugf("sendWs: %s", c.payload(msg))
 	return c.ws.Send(msg)
+}
+
+// SendBinary writes a raw binary attachment as a WebSocket binary frame. The
+// engine.io binary marker / base64 encoding is not applied over websocket:
+// binary travels in its own frame type.
+func (c *Transport) SendBinary(msg []byte) error {
+	c.log.Debugf("sendWsBinary: %s", c.payload(msg))
+	binaryWS, ok := c.ws.(BinaryWebSocket)
+	if !ok {
+		return errors.New("websocket implementation does not support binary attachments")
+	}
+	return binaryWS.SendBinary(msg)
+}
+
+// SupportsBinary checks the configured WebSocket adapter before an enclosing
+// Socket.IO client commits an attachment-bearing packet's text header.
+func (c *Transport) SupportsBinary() bool {
+	if _, ok := c.ws.(BinaryWebSocket); !ok {
+		return false
+	}
+	if capability, ok := c.ws.(interface{ SupportsBinary() bool }); ok {
+		return capability.SupportsBinary()
+	}
+	return true
 }

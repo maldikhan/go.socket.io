@@ -20,3 +20,10 @@ type WebSocket interface {
 	Receive(v *[]byte) (err error)
 	Close() error
 }
+
+// BinaryWebSocket is an optional capability of WebSocket implementations that
+// preserve frame opcodes for binary Socket.IO attachment delivery.
+type BinaryWebSocket interface {
+	SendBinary(v []byte) error
+	ReceiveFrame(v *[]byte) (isBinary bool, err error)
+}
