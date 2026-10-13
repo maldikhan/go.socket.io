@@ -127,7 +127,7 @@ func TestCloseJoinsTransportAfterConnectionContextCancellation(t *testing.T) {
 
 func TestRealWebSocketRepeatedCancelAndCloseWithIncomingPackets(t *testing.T) {
 	server := httptest.NewServer(websocket.Handler(func(ws *websocket.Conn) {
-		defer ws.Close()
+		defer func() { _ = ws.Close() }()
 		if websocket.Message.Send(ws, `0{"sid":"flood","pingInterval":1000,"pingTimeout":1000}`) != nil {
 			return
 		}
