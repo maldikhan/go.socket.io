@@ -1,11 +1,13 @@
 name: Contributors
 
+# Repository policy disables PR creation by GITHUB_TOKEN. Keep metadata
+# refresh opt-in; a maintainer can enable that policy before running it.
 on:
-  push:
-    branches: [ master ]
+  workflow_dispatch:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   contributors:
