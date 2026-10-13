@@ -348,23 +348,22 @@ The same option is available on the engine.io client
 
 ### Alternative WebSocket backend
 
-By default the WebSocket transport uses a zero-dependency backend built on
+By default the WebSocket transport uses the native backend built on
 `golang.org/x/net/websocket`. That package is frozen and lacks
 permessage-deflate compression, a proper RFC 6455 close handshake and
 configurable read limits.
 
-If you need those, opt in to the external backend built on
+If you need those, opt in to the `websocket/coder` package built on
 [github.com/coder/websocket](https://github.com/coder/websocket) (the actively
-maintained continuation of `nhooyr.io/websocket`). It lives in a separate
-module — [go.socket.io-websocket.coder](https://github.com/maldikhan/go.socket.io-websocket.coder) —
-so the main client stays dependency-free (same packaging as the
-[jsoniter parser](https://github.com/maldikhan/go.socket.io-parser.jsoniter)):
+maintained continuation of `nhooyr.io/websocket`). The native backend remains
+the default; the coder backend supports text and binary messages, configurable
+read limits, a custom HTTP client, and permessage-deflate compression:
 
 ```go
 import (
     engineio "github.com/maldikhan/go.socket.io/engine.io/v4/client"
     engineio_ws "github.com/maldikhan/go.socket.io/engine.io/v4/client/transport/websocket"
-    ws_coder "github.com/maldikhan/go.socket.io-websocket.coder"
+    ws_coder "github.com/maldikhan/go.socket.io/websocket/coder"
 )
 
 wsConn, err := ws_coder.New(
@@ -395,7 +394,11 @@ client, err := socketio.NewClient(
 )
 ```
 
-The backend is only linked into your binary when you import its module.
+The backend is only linked into your binary when you import its package.
+Compression is disabled by default. Use `WithHTTPClient` for custom TLS,
+proxy or cookie settings. `Close` performs a normal RFC 6455 close handshake;
+an unresponsive peer can delay the handshake by up to 10 seconds. Cancelling
+the session context aborts pending dials, reads and writes promptly.
 
 ## Concurrency Model
 
