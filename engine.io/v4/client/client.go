@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,9 @@ import (
 var errClientClosed = errors.New("client is closed")
 
 var ErrConnectAborted = errors.New("engine.io: connect aborted: client closed")
+
+// ErrPingTimeout reports a peer that stopped sending Engine.IO heartbeats.
+var ErrPingTimeout = errors.New("engine.io ping timeout")
 
 type Client struct {
 	url                 *url.URL
@@ -106,7 +110,11 @@ type Client struct {
 	// waiting on that gate reports the failure instead of success. Set by
 	// handleHandshake's upgrade-error path before the gate is closed, cleared
 	// by startConnection when the gate is re-armed. Guarded by transportMu.
-	handshakeErr error
+	handshakeErr      error
+	heartbeatTimeout  time.Duration
+	heartbeatDeadline time.Time
+	heartbeatReset    chan struct{}
+	heartbeatErr      error
 
 	// handlerMu protects access to the handler fields
 	// (messageHandler, closeHandler, afterConnect).
@@ -340,6 +348,10 @@ func (c *Client) startConnection(ctx context.Context) error {
 	c.hadHandshake = sync.Once{}
 	c.waitHandshake = make(chan struct{})
 	c.handshakeErr = nil
+	c.heartbeatTimeout = 0
+	c.heartbeatDeadline = time.Time{}
+	c.heartbeatReset = make(chan struct{}, 1)
+	c.heartbeatErr = nil
 
 	// Run transport before starting the message loop so that a Run()
 	// failure doesn't leak a goroutine.
@@ -449,6 +461,29 @@ func (c *Client) messageLoop(ctx context.Context, messages <-chan engineio_v4.Fr
 		c.log.Errorf("messages channel is nil, can't read transport messages")
 		return
 	}
+	c.transportMu.RLock()
+	heartbeatReset := c.heartbeatReset
+	c.transportMu.RUnlock()
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
+	var heartbeatTick <-chan time.Time
+	armHeartbeat := func() {
+		c.transportMu.RLock()
+		deadline := c.heartbeatDeadline
+		c.transportMu.RUnlock()
+		if deadline.IsZero() {
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(time.Until(deadline))
+		heartbeatTick = timer.C
+	}
 	for {
 		select {
 		case message, ok := <-messages:
@@ -459,6 +494,24 @@ func (c *Client) messageLoop(ctx context.Context, messages <-chan engineio_v4.Fr
 			if err != nil {
 				c.log.Errorf("handle packet error: %s", err)
 			}
+		case <-heartbeatReset:
+			armHeartbeat()
+		case <-heartbeatTick:
+			c.transportMu.Lock()
+			// A queued PING may have refreshed the deadline before the reset
+			// notification was selected. Prefer that new deadline.
+			if time.Now().Before(c.heartbeatDeadline) {
+				c.transportMu.Unlock()
+				armHeartbeat()
+				continue
+			}
+			c.heartbeatErr = ErrPingTimeout
+			transport := c.transport
+			c.transportMu.Unlock()
+			if transport != nil {
+				_ = transport.Stop()
+			}
+			return
 		case <-stop:
 			// A new connection cycle asked this loop to exit so it can take over
 			// with fresh channels (reconnect teardown).
@@ -568,12 +621,24 @@ func (c *Client) handleHandshake(data []byte) error {
 	if handshakeResp.Sid == "" {
 		return c.failHandshake(fmt.Errorf("handshake error: no sid"))
 	}
+	// Validate before creating/resetting tickers; malformed negative or
+	// overflowing server values must never panic the packet goroutine.
+	maxMS := int64(math.MaxInt64 / int64(time.Millisecond))
+	intervalMS := int64(handshakeResp.PingInterval)
+	timeoutMS := int64(handshakeResp.PingTimeout)
+	if intervalMS < 0 || timeoutMS < 0 || intervalMS > maxMS || timeoutMS > maxMS-intervalMS {
+		return c.failHandshake(errors.New("handshake error: invalid heartbeat interval or timeout"))
+	}
+	if c.stopRequested() {
+		return errClientClosed
+	}
 
 	// Upgrade transports
 	for _, transport := range c.supportedTransports {
 		transport.SetHandshake(handshakeResp)
 	}
 
+	c.transportMu.Lock()
 	c.sid = handshakeResp.Sid
 	if handshakeResp.PingInterval != 0 {
 		if c.pingInterval != nil {
@@ -588,6 +653,9 @@ func (c *Client) handleHandshake(data []byte) error {
 	if handshakeResp.PingTimeout != 0 {
 		c.pingTimeout = time.Duration(handshakeResp.PingTimeout) * time.Millisecond
 	}
+	c.heartbeatTimeout = time.Duration(intervalMS+timeoutMS) * time.Millisecond
+	c.transportMu.Unlock()
+	c.refreshHeartbeat()
 
 	// Perform protocol upgrade BEFORE unblocking Send() callers so that
 	// waitUpgrade is published before waitHandshake is closed. Otherwise
@@ -595,7 +663,13 @@ func (c *Client) handleHandshake(data []byte) error {
 	// and write on the old transport during the upgrade window.
 	if len(handshakeResp.Upgrades) > 0 {
 		for _, newTransportName := range handshakeResp.Upgrades {
-			if c.transport.Transport() == engineio_v4.EngineIOTransport(newTransportName) {
+			c.transportMu.RLock()
+			currentTransport := c.transport
+			c.transportMu.RUnlock()
+			if currentTransport == nil {
+				return errClientClosed
+			}
+			if currentTransport.Transport() == engineio_v4.EngineIOTransport(newTransportName) {
 				break
 			}
 			if newTransport, found := c.supportedTransports[engineio_v4.EngineIOTransport(newTransportName)]; found {
@@ -685,6 +759,7 @@ func (c *Client) handlePacket(packetData []byte) error {
 			}()
 		}
 	case engineio_v4.PacketPing:
+		c.refreshHeartbeat()
 		err := c.sendPacket(&engineio_v4.Message{
 			Type: engineio_v4.PacketPong,
 		})
@@ -732,6 +807,19 @@ func (c *Client) handlePacket(packetData []byte) error {
 		}
 	}
 	return nil
+}
+
+func (c *Client) refreshHeartbeat() {
+	c.transportMu.Lock()
+	defer c.transportMu.Unlock()
+	if c.heartbeatTimeout <= 0 {
+		return
+	}
+	c.heartbeatDeadline = time.Now().Add(c.heartbeatTimeout)
+	select {
+	case c.heartbeatReset <- struct{}{}:
+	default:
+	}
 }
 
 func (c *Client) sendPacket(packet *engineio_v4.Message) error {
@@ -905,8 +993,11 @@ func (c *Client) Close() error {
 	c.releaseGates()
 
 	// Stop the ping ticker to prevent goroutine leak
-	if c.pingInterval != nil {
-		c.pingInterval.Stop()
+	c.transportMu.RLock()
+	pingInterval := c.pingInterval
+	c.transportMu.RUnlock()
+	if pingInterval != nil {
+		pingInterval.Stop()
 	}
 
 	if t == nil {

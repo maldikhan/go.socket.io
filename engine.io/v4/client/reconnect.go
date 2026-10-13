@@ -80,6 +80,12 @@ func (c *Client) supervise(closed chan error, done chan struct{}) {
 	case <-ctxDone:
 		return
 	}
+	c.transportMu.RLock()
+	heartbeatErr := c.heartbeatErr
+	c.transportMu.RUnlock()
+	if err == nil && heartbeatErr != nil {
+		err = heartbeatErr
+	}
 
 	// A nil error means a graceful stop (Close or upgrade already drained the
 	// channel for us). Nothing to do.

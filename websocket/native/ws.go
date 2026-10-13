@@ -27,6 +27,7 @@ func (ws *WebSocketConnection) Dial(ctx context.Context, url *url.URL, origin *u
 	if err != nil {
 		return err
 	}
+	conn.MaxPayloadBytes = 4 * 1024 * 1024
 	ws.mu.Lock()
 	previous := ws.conn
 	ws.conn = conn
