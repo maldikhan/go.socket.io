@@ -79,7 +79,9 @@ jobs:
         run: go mod download
 
       - name: Run tests for main project
-        run: go test -race -timeout=5m -coverprofile=coverage.out ./...
+        run: |
+          packages=$(go list ./... | grep -v /mocks)
+          go test -race -timeout=5m -coverprofile=coverage.out $packages
 
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v4

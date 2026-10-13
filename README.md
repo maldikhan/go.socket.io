@@ -31,6 +31,8 @@ Version 0.2.0 adds automatic reconnection, binary events and acknowledgements, i
   - [Closing the connection](#closing-the-connection)
 - [Advanced Configuration](#advanced-configuration)
 - [Concurrency Model](#concurrency-model)
+- [Binary events](docs/binary.md)
+- [Migration and release notes](CHANGELOG.md)
 - [Limitations](#limitations)
 - [Contributing](#contributing)
 - [License](#license)
@@ -131,7 +133,7 @@ if err != nil {
 }
 ```
 
-You can also pass one or more callback functions as additional parameters to `client.Connect`. These callbacks will be executed upon successful connection. This is effectively an alias for `client.On("connect", func(){...})`. Here's an example:
+You can also pass one or more callback functions as additional parameters to `client.Connect`. These callbacks will be executed upon successful connection. This is effectively an alias for `client.On("connect", func(interface{}){...})`. Here's an example:
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
