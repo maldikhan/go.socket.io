@@ -187,5 +187,17 @@ func (c *Client) safeGo(fn func()) {
 }
 
 func (c *Client) Close() error {
-	return c.engineio.Close()
+	err := c.engineio.Close()
+	c.mutex.RLock()
+	namespaces := make([]*namespace, 0, len(c.namespaces))
+	for _, ns := range c.namespaces {
+		namespaces = append(namespaces, ns)
+	}
+	c.mutex.RUnlock()
+	// Release emitters parked on an initial or reconnect namespace handshake
+	// after the engine is closed, so their send fails promptly.
+	for _, ns := range namespaces {
+		ns.openConnectionGate()
+	}
+	return err
 }

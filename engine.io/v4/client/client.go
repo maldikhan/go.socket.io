@@ -61,6 +61,9 @@ type Client struct {
 	// unexpected drop. It is read/written with sync/atomic for goroutine safety
 	// (atomic.Bool is unavailable on Go 1.18).
 	closing uint32
+	// A transport packet callback may call Close synchronously. In that case
+	// Close stops the transport without waiting for its own message loop.
+	callbacksInFlight uint32
 
 	// superviseOnce guards startSupervisor so exactly one supervisor goroutine
 	// runs per connection cycle. It is reset before every (re)connect attempt.
@@ -332,6 +335,11 @@ func (c *Client) startConnection(ctx context.Context) error {
 	// the prior connection.
 	c.hadUpgrade = sync.Once{}
 	c.waitUpgrade = nil
+	// Arm the handshake before Run can publish an OPEN packet. WebSocket
+	// transports may deliver it immediately, before RequestHandshake returns.
+	c.hadHandshake = sync.Once{}
+	c.waitHandshake = make(chan struct{})
+	c.handshakeErr = nil
 
 	// Run transport before starting the message loop so that a Run()
 	// failure doesn't leak a goroutine.
@@ -370,12 +378,6 @@ func (c *Client) startConnection(ctx context.Context) error {
 	c.messagesStop = messagesStop
 	c.transportMu.Unlock()
 	go c.messageLoop(ctx, messages, messagesDone, messagesStop)
-
-	c.transportMu.Lock()
-	c.hadHandshake = sync.Once{}
-	c.waitHandshake = make(chan struct{}, 1)
-	c.handshakeErr = nil
-	c.transportMu.Unlock()
 
 	err = transport.RequestHandshake()
 	if err != nil {
@@ -676,7 +678,11 @@ func (c *Client) handlePacket(packetData []byte) error {
 		handler := c.closeHandler
 		c.handlerMu.RUnlock()
 		if handler != nil {
-			handler()
+			atomic.AddUint32(&c.callbacksInFlight, 1)
+			func() {
+				defer atomic.AddUint32(&c.callbacksInFlight, ^uint32(0))
+				handler()
+			}()
 		}
 	case engineio_v4.PacketPing:
 		err := c.sendPacket(&engineio_v4.Message{
@@ -714,14 +720,15 @@ func (c *Client) handlePacket(packetData []byte) error {
 		handler := c.messageHandler
 		binaryHandler := c.binaryHandler
 		c.handlerMu.RUnlock()
-		// A base64 "b"-prefixed record decodes to a binary attachment; route it
-		// to the binary handler so socket.io can reassemble binary events.
 		if packet.Binary {
-			if binaryHandler != nil {
-				binaryHandler(packet.Data)
-			}
-		} else if handler != nil {
-			handler(packet.Data)
+			handler = binaryHandler
+		}
+		if handler != nil {
+			atomic.AddUint32(&c.callbacksInFlight, 1)
+			func() {
+				defer atomic.AddUint32(&c.callbacksInFlight, ^uint32(0))
+				handler(packet.Data)
+			}()
 		}
 	}
 	return nil
@@ -737,7 +744,13 @@ func (c *Client) sendPacket(packet *engineio_v4.Message) error {
 		return err
 	}
 
-	return c.transport.SendMessage(msg)
+	c.transportMu.RLock()
+	transport := c.transport
+	c.transportMu.RUnlock()
+	if transport == nil {
+		return errClientClosed
+	}
+	return transport.SendMessage(msg)
 }
 
 func (c *Client) Send(message []byte) error {
@@ -745,14 +758,21 @@ func (c *Client) Send(message []byte) error {
 	// channel created by a concurrent transportUpgrade or Connect.
 	c.transportMu.RLock()
 	wh := c.waitHandshake
-	wu := c.waitUpgrade
 	c.transportMu.RUnlock()
 
 	if wh != nil {
-		<-wh
+		if err := c.waitForGate(wh); err != nil {
+			return err
+		}
 	}
+	// The handshake may have published an upgrade gate while Send waited.
+	c.transportMu.RLock()
+	wu := c.waitUpgrade
+	c.transportMu.RUnlock()
 	if wu != nil {
-		<-wu
+		if err := c.waitForGate(wu); err != nil {
+			return err
+		}
 	}
 
 	// Re-acquire the lock to read the current transport safely.
@@ -774,6 +794,21 @@ func (c *Client) Send(message []byte) error {
 		return err
 	}
 	return t.SendMessage(msg)
+}
+
+func (c *Client) waitForGate(gate <-chan struct{}) error {
+	var ctxDone <-chan struct{}
+	if c.ctx != nil {
+		ctxDone = c.ctx.Done()
+	}
+	select {
+	case <-c.closeCh:
+		return errClientClosed
+	case <-ctxDone:
+		return c.ctx.Err()
+	case <-gate:
+		return nil
+	}
 }
 
 func (c *Client) On(event string, handler func([]byte)) {
@@ -914,7 +949,7 @@ func (c *Client) Close() error {
 	// Wait for messageLoop goroutine to finish so that no mock/logger
 	// calls happen after the caller returns (prevents test panics and
 	// ensures clean shutdown).
-	if messagesDone != nil {
+	if messagesDone != nil && atomic.LoadUint32(&c.callbacksInFlight) == 0 {
 		<-messagesDone
 	}
 	return nil
@@ -954,7 +989,11 @@ func (c *Client) handleFrame(frame engineio_v4.Frame) error {
 		handler := c.binaryHandler
 		c.handlerMu.RUnlock()
 		if handler != nil {
-			handler(frame.Data)
+			atomic.AddUint32(&c.callbacksInFlight, 1)
+			func() {
+				defer atomic.AddUint32(&c.callbacksInFlight, ^uint32(0))
+				handler(frame.Data)
+			}()
 		}
 		return nil
 	}

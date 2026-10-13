@@ -95,6 +95,13 @@ func (c *Client) supervise(closed chan error, done chan struct{}) {
 	if c.stopRequested() {
 		return
 	}
+	// This transport is already gone and its sole notification was consumed.
+	// Release its ownership before any lifecycle callback: a callback may call
+	// Close synchronously, including reconnecting and reconnect_failed hooks.
+	c.transportMu.Lock()
+	close(closed)
+	atomic.StoreUint32(&c.supervisorStarted, 0)
+	c.transportMu.Unlock()
 
 	if !c.reconnect {
 		// Reconnection disabled: the drop is terminal for this client. Release
@@ -106,9 +113,6 @@ func (c *Client) supervise(closed chan error, done chan struct{}) {
 		// transportClosed channel whose single notification was already
 		// consumed above. The channel is closed here (the dead transport sends
 		// exactly one value) so that drain returns immediately.
-		atomic.StoreUint32(&c.supervisorStarted, 0)
-		close(closed)
-
 		// Surface the drop to the close handler so the behaviour matches the
 		// pre-reconnect client exactly.
 		c.handlerMu.RLock()

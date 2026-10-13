@@ -10,8 +10,9 @@ import (
 )
 
 type WebSocketConnection struct {
-	mu   sync.Mutex
-	conn *websocket.Conn
+	mu     sync.RWMutex
+	sendMu sync.Mutex
+	conn   *websocket.Conn
 }
 
 var ErrNotConnected = errors.New("socket connection is not initialized")
@@ -22,35 +23,54 @@ func (ws *WebSocketConnection) Dial(ctx context.Context, url *url.URL, origin *u
 	if err != nil {
 		return err
 	}
-	ws.conn, err = config.DialContext(ctx)
-	return err
+	conn, err := config.DialContext(ctx)
+	if err != nil {
+		return err
+	}
+	ws.mu.Lock()
+	previous := ws.conn
+	ws.conn = conn
+	ws.mu.Unlock()
+	if previous != nil {
+		_ = previous.Close()
+	}
+	return nil
 }
 
 func (ws *WebSocketConnection) Send(v []byte) error {
-	if ws.conn == nil {
+	ws.mu.RLock()
+	conn := ws.conn
+	ws.mu.RUnlock()
+	if conn == nil {
 		return ErrNotConnected
 	}
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-	return websocket.Message.Send(ws.conn, string(v))
+	ws.sendMu.Lock()
+	defer ws.sendMu.Unlock()
+	return websocket.Message.Send(conn, string(v))
 }
 
 // SendBinary writes v as a WebSocket binary frame (opcode 2). Engine.io v4
 // carries socket.io binary attachments as binary frames over websocket.
 func (ws *WebSocketConnection) SendBinary(v []byte) error {
-	if ws.conn == nil {
+	ws.mu.RLock()
+	conn := ws.conn
+	ws.mu.RUnlock()
+	if conn == nil {
 		return ErrNotConnected
 	}
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-	return websocket.Message.Send(ws.conn, v)
+	ws.sendMu.Lock()
+	defer ws.sendMu.Unlock()
+	return websocket.Message.Send(conn, v)
 }
 
 func (ws *WebSocketConnection) Receive(v *[]byte) error {
-	if ws.conn == nil {
+	ws.mu.RLock()
+	conn := ws.conn
+	ws.mu.RUnlock()
+	if conn == nil {
 		return ErrNotConnected
 	}
-	return websocket.Message.Receive(ws.conn, v)
+	return websocket.Message.Receive(conn, v)
 }
 
 // ReceiveFrame reads the next frame and reports whether it was a binary frame
@@ -59,7 +79,10 @@ func (ws *WebSocketConnection) Receive(v *[]byte) error {
 // websocket.Message codec collapses. Text and binary frames are both returned
 // as raw bytes in *v.
 func (ws *WebSocketConnection) ReceiveFrame(v *[]byte) (isBinary bool, err error) {
-	if ws.conn == nil {
+	ws.mu.RLock()
+	conn := ws.conn
+	ws.mu.RUnlock()
+	if conn == nil {
 		return false, ErrNotConnected
 	}
 	pt := byte(websocket.TextFrame)
@@ -70,17 +93,19 @@ func (ws *WebSocketConnection) ReceiveFrame(v *[]byte) (isBinary bool, err error
 			return nil
 		},
 	}
-	if err := codec.Receive(ws.conn, v); err != nil {
+	if err := codec.Receive(conn, v); err != nil {
 		return false, err
 	}
 	return pt == byte(websocket.BinaryFrame), nil
 }
 
 func (ws *WebSocketConnection) Close() error {
-	if ws.conn == nil {
+	ws.mu.Lock()
+	conn := ws.conn
+	ws.conn = nil
+	ws.mu.Unlock()
+	if conn == nil {
 		return nil
 	}
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-	return ws.conn.Close()
+	return conn.Close()
 }

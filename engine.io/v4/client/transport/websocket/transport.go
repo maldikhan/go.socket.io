@@ -21,6 +21,7 @@ type Transport struct {
 	messages    chan<- engineio_v4.Frame
 	onClose     chan<- error
 	stopPooling chan struct{}
+	readDone    chan struct{}
 	mu          sync.RWMutex
 
 	// redactPayload, when true, replaces raw payloads in debug logs with a
@@ -41,11 +42,14 @@ func (c *Transport) Transport() engineio_v4.EngineIOTransport {
 }
 
 func (c *Transport) Stop() (err error) {
+	c.mu.RLock()
+	stop := c.stopPooling
+	c.mu.RUnlock()
 	// Use non-blocking send: if wsReadLoop already exited (e.g. via
 	// ctx.Done() or a WebSocket error), nobody is reading from
 	// stopPooling and a blocking send would deadlock.
 	select {
-	case c.stopPooling <- struct{}{}:
+	case stop <- struct{}{}:
 	default:
 	}
 	return nil
@@ -58,13 +62,14 @@ func (c *Transport) Run(
 	messagesChan chan<- engineio_v4.Frame,
 	onClose chan<- error,
 ) error {
-	c.ctx = ctx
 	c.mu.Lock()
+	c.ctx = ctx
 	c.sid = sid
-	c.mu.Unlock()
 	c.url = url
 	c.messages = messagesChan
 	c.onClose = onClose
+	c.stopPooling = make(chan struct{}, 1)
+	c.mu.Unlock()
 	return c.connectWebSocket()
 }
 
@@ -113,25 +118,44 @@ func (c *Transport) buildWsUrl() *url.URL {
 
 func (c *Transport) connectWebSocket() error {
 	c.log.Debugf("open ws")
+	// Each read loop owns immutable cycle state. Reconnect reuses this
+	// transport, so old loops must never read a newer run's channels/context.
+	c.mu.RLock()
+	cycle := &Transport{
+		log: c.log, ws: c.ws, sid: c.sid, url: c.url, origin: c.origin,
+		ctx: c.ctx, messages: c.messages, stopPooling: c.stopPooling,
+		onClose: make(chan error, 1), redactPayload: c.redactPayload,
+	}
+	onClose := c.onClose
+	c.mu.RUnlock()
 
-	origin := c.origin
+	origin := cycle.origin
 	if origin == nil {
-		origin = c.url
+		origin = cycle.url
 	}
 
-	err := c.ws.Dial(c.ctx, c.buildWsUrl(), origin)
+	err := cycle.ws.Dial(cycle.ctx, cycle.buildWsUrl(), origin)
 	if err != nil {
 		return err
 	}
 
 	go func() {
-		err := c.wsReadLoop()
+		err := cycle.wsReadLoop()
 		if err != nil {
 			c.log.Errorf("wsReadLoop: %s", err)
 		}
-		err = c.ws.Close()
-		if err != nil {
-			c.log.Errorf("wsClose: %s", err)
+		closeErr := cycle.ws.Close()
+		if closeErr != nil {
+			c.log.Errorf("wsClose: %s", closeErr)
+		}
+		// Close unblocks the in-flight Receive. Wait until it has returned
+		// before allowing a new Dial to replace the shared WebSocket.
+		if cycle.readDone != nil {
+			<-cycle.readDone
+		}
+		select {
+		case onClose <- err:
+		default:
 		}
 		// Reconnection is handled at the engine.io Client level: wsReadLoop
 		// reports the drop (with its error) via onClose, and the client's
@@ -156,7 +180,10 @@ func (c *Transport) wsReadLoop() error {
 	errorCh := make(chan error, 1)
 	for {
 		// Run ws read in goroutine
+		readDone := make(chan struct{})
+		c.readDone = readDone
 		go func() {
+			defer close(readDone)
 			var message []byte
 			isBinary, err := c.ws.ReceiveFrame(&message)
 			if err != nil {
