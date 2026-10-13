@@ -31,20 +31,23 @@ func TestClient_Connect(t *testing.T) {
 	defer cancel()
 
 	testURL, _ := url.Parse("http://localhost")
-	client := &Client{
-		url:                 testURL,
-		log:                 mockLogger,
-		parser:              mockParser,
-		supportedTransports: map[engineio_v4.EngineIOTransport]Transport{engineio_v4.TransportPolling: mockTransport},
-		transport:           mockTransport,
-		messages:            make(chan engineio_v4.Frame, 100),
-		transportClosed:     make(chan error, 1),
-		ctx:                 ctx,
+	newClient := func() *Client {
+		return &Client{
+			url:                 testURL,
+			log:                 mockLogger,
+			parser:              mockParser,
+			supportedTransports: map[engineio_v4.EngineIOTransport]Transport{engineio_v4.TransportPolling: mockTransport},
+			transport:           mockTransport,
+			messages:            make(chan engineio_v4.Frame, 100),
+			transportClosed:     make(chan error, 1),
+			ctx:                 ctx,
+		}
 	}
 
 	mockLogger.EXPECT().Debugf(gomock.Any(), gomock.Any()).AnyTimes()
 
 	t.Run("Successful connect", func(t *testing.T) {
+		client := newClient()
 
 		connected := make(chan struct{}, 1)
 		client.afterConnect = func() { close(connected) }
@@ -102,8 +105,7 @@ func TestClient_Connect(t *testing.T) {
 	})
 
 	t.Run("Transport run error", func(t *testing.T) {
-		// Reset transport after previous Close() nil'd it out.
-		client.transport = mockTransport
+		client := newClient()
 
 		mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(errors.New("run error"))
 		err := client.Connect(ctx)
@@ -116,8 +118,7 @@ func TestClient_Connect(t *testing.T) {
 	})
 
 	t.Run("Handshake request error", func(t *testing.T) {
-		// Reset transport after previous Close() nil'd it out.
-		client.transport = mockTransport
+		client := newClient()
 
 		ctx := context.Background()
 		mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
