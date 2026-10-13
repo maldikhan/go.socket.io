@@ -115,6 +115,9 @@ type Client struct {
 	heartbeatDeadline time.Time
 	heartbeatReset    chan struct{}
 	heartbeatErr      error
+	// cycleCtx is the current attempt/session context, including a retry's
+	// setup deadline cancellation. Upgrade must inherit the same context.
+	cycleCtx context.Context
 
 	// handlerMu protects access to the handler fields
 	// (messageHandler, closeHandler, afterConnect).
@@ -352,6 +355,7 @@ func (c *Client) startConnection(ctx context.Context) error {
 	c.heartbeatDeadline = time.Time{}
 	c.heartbeatReset = make(chan struct{}, 1)
 	c.heartbeatErr = nil
+	c.cycleCtx = ctx
 
 	// Run transport before starting the message loop so that a Run()
 	// failure doesn't leak a goroutine.
@@ -586,7 +590,11 @@ func (c *Client) transportUpgrade(transport Transport) error {
 	c.transport = transport
 
 	c.transportClosed = make(chan error, 1)
-	err = c.transport.Run(c.ctx, c.url, c.sid, c.messages, c.transportClosed)
+	cycleCtx := c.cycleCtx
+	if cycleCtx == nil {
+		cycleCtx = c.ctx
+	}
+	err = c.transport.Run(cycleCtx, c.url, c.sid, c.messages, c.transportClosed)
 	if err != nil {
 		close(c.transportClosed)
 		c.log.Errorf("run transport: %s", err)
