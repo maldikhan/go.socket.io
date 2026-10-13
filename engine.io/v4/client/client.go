@@ -1047,6 +1047,10 @@ func (c *Client) Close() error {
 	// of the parties blocked forever.
 	waitForCycle := atomic.LoadUint32(&c.supervisorStarted) == 1 ||
 		atomic.LoadUint32(&c.attemptInFlight) == 1
+	// NewClient allocates a placeholder close channel before any producer is
+	// running. Closing an unused client must not wait for a value that can never
+	// be produced. ctx/messages also cover directly constructed test clients.
+	hadConnection := waitForCycle || c.cycleCtx != nil || c.ctx != nil || c.messages != nil
 	supervisorDone := c.supervisorDone
 	cycleCancel := c.cycleCancel
 	c.cycleCancel = nil
@@ -1096,7 +1100,7 @@ func (c *Client) Close() error {
 		if supervisorDone != nil {
 			<-supervisorDone
 		}
-	} else if !waitForCycle && transportClosed != nil {
+	} else if !waitForCycle && hadConnection && transportClosed != nil {
 		<-transportClosed
 	}
 

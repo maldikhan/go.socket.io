@@ -17,6 +17,20 @@ import (
 	"golang.org/x/net/websocket"
 )
 
+func TestCloseBeforeFirstConnect(t *testing.T) {
+	client, err := NewClient(WithRawURL("http://localhost/socket.io/"), WithLogger(&utils.DefaultLogger{Level: utils.NONE}))
+	require.NoError(t, err)
+	result := make(chan error, 1)
+	go func() { result <- client.Close() }()
+	select {
+	case err := <-result:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Close waited for a transport that was never started")
+	}
+	require.NoError(t, client.Close())
+}
+
 func TestCloseWhileOpenArrivesBeforeHandshakeRequestReturns(t *testing.T) {
 	client, transport, _, _ := newReconnectClient(t)
 	client.parser = &parser.EngineIOV4Parser{}
