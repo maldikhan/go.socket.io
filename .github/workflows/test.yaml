@@ -95,7 +95,7 @@ jobs:
       - name: Check coverage
         run: |
           total_coverage=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
-          if (( $(echo "$total_coverage < 80" | bc -l) )); then
-            echo "Code coverage is below 80%"
+          if (( $(echo "$total_coverage < 95" | bc -l) )); then
+            echo "Code coverage is below 95%"
             exit 1
           fi

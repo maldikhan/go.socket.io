@@ -39,9 +39,7 @@ jobs:
 
       - name: Install gosec
         run: |
-          if ! command -v gosec &> /dev/null; then
-            go install github.com/securego/gosec/v2/cmd/gosec@latest
-          fi
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
 
       - name: Run gosec on main project
         run: |
@@ -85,9 +83,7 @@ jobs:
 
       - name: Install govulncheck
         run: |
-          if ! command -v govulncheck &> /dev/null; then
-            go install golang.org/x/vuln/cmd/govulncheck@latest
-          fi
+          go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Run govulncheck on main project
         run: |

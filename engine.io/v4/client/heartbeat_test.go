@@ -23,7 +23,7 @@ func TestSilentWebSocketTriggersPingTimeout(t *testing.T) {
 		var packet string
 		_ = websocket.Message.Receive(ws, &packet)
 	}))
-	defer func() { _ = server.Close() }()
+	defer server.Close()
 	transport, err := wsTransport.NewTransport(wsTransport.WithLogger(&utils.DefaultLogger{Level: utils.NONE}))
 	require.NoError(t, err)
 	failed := make(chan struct{}, 1)

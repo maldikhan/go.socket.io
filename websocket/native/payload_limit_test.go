@@ -17,7 +17,7 @@ func TestWebSocketConnectionRejectsOversizedFrame(t *testing.T) {
 		defer func() { _ = conn.Close() }()
 		_ = websocket.Message.Send(conn, strings.Repeat("x", 4*1024*1024+1))
 	}))
-	defer func() { _ = server.Close() }()
+	defer server.Close()
 	u, err := url.Parse(strings.Replace(server.URL, "http://", "ws://", 1))
 	require.NoError(t, err)
 	origin, err := url.Parse(server.URL)
