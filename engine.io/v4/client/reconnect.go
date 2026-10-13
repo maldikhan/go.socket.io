@@ -1,7 +1,9 @@
 package engineio_v4_client
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 )
@@ -27,12 +29,22 @@ var errHandshakeIncomplete = errors.New("engine.io handshake did not complete")
 // up the cycle), there is no transportClosed channel to watch, so startSupervisor
 // is a no-op — there is nothing to supervise.
 func (c *Client) startSupervisor() {
+	// RequestHandshake's error cleanup owns the close notification until the
+	// attempt returns. Do not consume the Once here: a successful attempt will
+	// retry this call once it can transfer ownership to the supervisor.
+	if atomic.LoadUint32(&c.attemptInFlight) == 1 {
+		return
+	}
 	c.superviseOnce.Do(func() {
 		// Snapshot the cycle's channels and flip supervisorStarted in the same
 		// critical section that startConnection/Close use, so Close() always
 		// observes a consistent supervisorStarted/supervisorDone pair.
 		c.transportMu.RLock()
 		closed := c.transportClosed
+		cycleCtx := c.cycleCtx
+		if cycleCtx == nil {
+			cycleCtx = c.ctx
+		}
 		// Capture the done channel for THIS cycle. A successful reconnect
 		// replaces c.supervisorDone with a fresh channel, so the supervisor must
 		// close the one it was started with, not the current field.
@@ -53,7 +65,7 @@ func (c *Client) startSupervisor() {
 			// channel.
 			return
 		}
-		go c.supervise(closed, done)
+		go c.superviseCycle(closed, done, cycleCtx)
 	})
 }
 
@@ -62,6 +74,16 @@ func (c *Client) startSupervisor() {
 // that the supervisor watches the channels that belong to this connection cycle
 // even if the fields are later replaced by a reconnect attempt.
 func (c *Client) supervise(closed chan error, done chan struct{}) {
+	c.transportMu.RLock()
+	ctx := c.cycleCtx
+	if ctx == nil {
+		ctx = c.ctx
+	}
+	c.transportMu.RUnlock()
+	c.superviseCycle(closed, done, ctx)
+}
+
+func (c *Client) superviseCycle(closed chan error, done chan struct{}, ctx context.Context) {
 	if done != nil {
 		defer close(done)
 	}
@@ -70,15 +92,18 @@ func (c *Client) supervise(closed chan error, done chan struct{}) {
 	// context was never assigned (defensive: the normal Connect path always sets
 	// one), in which case the select simply blocks on the transport close.
 	var ctxDone <-chan struct{}
-	if c.ctx != nil {
-		ctxDone = c.ctx.Done()
+	if ctx != nil {
+		ctxDone = ctx.Done()
 	}
 
 	var err error
 	select {
 	case err = <-closed:
 	case <-ctxDone:
-		return
+		// Cancellation asks the transport to exit, but its producer may still
+		// be delivering a message. Join the actual exit notification before
+		// releasing the cycle owner and allowing Close to finish teardown.
+		err = <-closed
 	}
 	c.transportMu.RLock()
 	heartbeatErr := c.heartbeatErr
@@ -98,7 +123,7 @@ func (c *Client) supervise(closed chan error, done chan struct{}) {
 	// select may receive that error before noticing ctxDone. Both are
 	// intentional shutdowns: starting reconnect logic (or invoking the close
 	// handler below) would emit spurious lifecycle events, so bail out first.
-	if c.stopRequested() {
+	if c.stopRequested() || (ctx != nil && ctx.Err() != nil) {
 		return
 	}
 	// This transport is already gone and its sole notification was consumed.
@@ -184,24 +209,18 @@ func (c *Client) reconnectLoop(cause error) {
 		}
 
 		c.log.Debugf("reconnect attempt %d/%d", attempt, c.reconnectAttempts)
-		err := c.startConnection(c.ctx)
+		bound := maxBackoff
+		if c.connectTimeout > 0 {
+			bound = c.connectTimeout
+		}
+		err := c.reconnectOnce(bound)
 		if err == nil {
-			// startConnection only guarantees the handshake request was sent
-			// (for polling it returns once the first poll response is queued);
-			// the OPEN packet is processed asynchronously by the message loop.
-			// Only declare the reconnect successful once the handshake actually
-			// completed — otherwise a malformed response or a failed upgrade
-			// would fire "reconnect" for a session that never opened and
-			// silently end the retry loop.
-			if c.awaitConnectionEstablished(maxBackoff) {
-				c.log.Infof("engine.io reconnected on attempt %d", attempt)
-				c.fireReconnect()
-				return
-			}
-			if c.stopRequested() {
-				return
-			}
-			err = errHandshakeIncomplete
+			c.log.Infof("engine.io reconnected on attempt %d", attempt)
+			c.fireReconnect()
+			return
+		}
+		if c.stopRequested() {
+			return
 		}
 		c.log.Errorf("reconnect attempt %d failed: %s", attempt, err)
 
@@ -223,13 +242,77 @@ func (c *Client) reconnectLoop(cause error) {
 	_ = c.Close()
 }
 
+// reconnectOnce bounds the complete retry (dial, OPEN and upgrade), then stops
+// the timer on success so the same child context can drive the session. Each
+// failed retry cancels only its child; the caller's session context remains live
+// for subsequent retries. Close releases the child through cycleCancel.
+func (c *Client) reconnectOnce(bound time.Duration) error {
+	parent := c.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	c.transportMu.Lock()
+	previousCancel := c.cycleCancel
+	c.cycleCancel = cancel
+	c.transportMu.Unlock()
+	if previousCancel != nil {
+		previousCancel()
+	}
+
+	var fired atomic.Bool
+	timerDone := make(chan struct{})
+	timer := time.AfterFunc(bound, func() {
+		defer close(timerDone)
+		fired.Store(true)
+		atomic.StoreUint32(&c.cycleAbandoned, 1)
+		cancel()
+	})
+
+	err := c.startConnection(ctx)
+	if err == nil && !c.awaitConnectionEstablishedContext(bound, ctx) {
+		err = c.handshakeFailure()
+		if err == nil {
+			err = errHandshakeIncomplete
+		}
+	}
+	if !timer.Stop() {
+		<-timerDone
+	}
+	if err == nil && ctx.Err() == nil {
+		c.startSupervisor()
+		return nil
+	}
+	if err == nil {
+		// The timeout callback started after the gates completed, while Stop
+		// was losing the race. Join and abandon that cancelled session rather
+		// than returning success or leaving a transport running after expiry.
+		c.awaitConnectionEstablishedContext(bound, ctx)
+	}
+	cancel()
+	if parent.Err() != nil {
+		return parent.Err()
+	}
+	if fired.Load() {
+		return fmt.Errorf("engine.io: reconnect timeout after %s: %w", bound, context.DeadlineExceeded)
+	}
+	if c.stopRequested() {
+		return ErrConnectAborted
+	}
+	return err
+}
+
 // awaitConnectionEstablished waits for the attempt started by startConnection
-// to finish its Engine.IO handshake: handleHandshake closes the waitHandshake
-// gate only after the OPEN packet is processed and an eventual transport
-// upgrade completed. It returns false — after tearing the half-open attempt
+// to finish its Engine.IO handshake and any transport upgrade. The handshake
+// gate confirms OPEN processing; the upgrade gate confirms the probe pong and
+// final upgrade write. It returns false after tearing the half-open attempt
 // down — when the transport dies first, the bound elapses, the run context is
 // cancelled or Close() is called.
 func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
+	return c.awaitConnectionEstablishedContext(bound, c.ctx)
+}
+
+func (c *Client) awaitConnectionEstablishedContext(bound time.Duration, ctx context.Context) bool {
 	c.transportMu.RLock()
 	wh := c.waitHandshake
 	c.transportMu.RUnlock()
@@ -237,8 +320,8 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 	// nil channels block forever in a select, which is exactly the desired
 	// fallback for clients built without NewClient/Connect (tests).
 	var ctxDone <-chan struct{}
-	if c.ctx != nil {
-		ctxDone = c.ctx.Done()
+	if ctx != nil {
+		ctxDone = ctx.Done()
 	}
 	closeCh := c.closeCh
 
@@ -259,7 +342,24 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 			return false
 		}
 		if c.handshakeFailure() == nil {
-			return true
+			// OPEN releases the handshake gate before the probe pong and final
+			// upgrade write. Both gates, including any recorded write failure,
+			// must complete before the retry can emit a reconnect notification.
+			c.transportMu.RLock()
+			wu := c.waitUpgrade
+			c.transportMu.RUnlock()
+			if wu == nil {
+				return ctx == nil || ctx.Err() == nil
+			}
+			select {
+			case <-wu:
+				if !c.stopRequested() && c.handshakeFailure() == nil && (ctx == nil || ctx.Err() == nil) {
+					return true
+				}
+			case <-ctxDone:
+			case <-closeCh:
+			case <-timer.C:
+			}
 		}
 		// The gate was released by handleHandshake's upgrade-error path: the
 		// handshake never established a session and the half-open attempt may
@@ -270,13 +370,18 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 		// Context cancellation winds the transports and the message loop down
 		// on its own, but nothing ever closes this cycle's handshake gate;
 		// release it so Send() callers parked there fail fast.
-		c.releaseGates()
-		return false
+		if c.stopRequested() {
+			c.releaseGates()
+			return false
+		}
 	case <-closeCh:
 		// Close() owns the teardown (attempt finished, supervisor not started,
 		// so it drains transportClosed itself) and releases the gates.
 		return false
 	case <-timer.C:
+	}
+	if c.stopRequested() {
+		return false
 	}
 
 	// The bound elapsed. Re-check the gate under the lock and abandon the
@@ -290,7 +395,14 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 	case <-wh:
 		// Same guards as above: a gate released by Close()'s teardown or by a
 		// failed upgrade is not a completed handshake.
-		completed = c.handshakeErr == nil
+		completed = c.handshakeErr == nil && (ctx == nil || ctx.Err() == nil)
+		if completed && c.waitUpgrade != nil {
+			select {
+			case <-c.waitUpgrade:
+			default:
+				completed = false
+			}
+		}
 	default:
 	}
 	if completed {
@@ -300,25 +412,45 @@ func (c *Client) awaitConnectionEstablished(bound time.Duration) bool {
 	atomic.StoreUint32(&c.cycleAbandoned, 1)
 	transport := c.transport
 	closed := c.transportClosed
+	supervised := atomic.LoadUint32(&c.supervisorStarted) == 1
+	supervisorDone := c.supervisorDone
+	// A released handshake gate with an incomplete upgrade cannot serve as
+	// evidence that the transport stopped; wait for its real close notification.
+	var handshakeWasClosed bool
+	select {
+	case <-wh:
+		handshakeWasClosed = true
+	default:
+	}
 	c.transportMu.Unlock()
 
 	if transport != nil {
 		_ = transport.Stop()
-		select {
-		case _, ok := <-closed:
-			// Single close notification consumed; close the channel so a later
-			// Close() doesn't block draining it. When the failed upgrade
-			// already closed the channel (its new transport never ran), ok is
-			// false and there is nothing left to close.
-			if ok {
+		if supervised {
+			if supervisorDone != nil {
+				<-supervisorDone
+			}
+		} else if handshakeWasClosed {
+			if _, ok := <-closed; ok {
 				close(closed)
 			}
-		case <-wh:
-			// Photo-finish: the handshake completed while we were stopping the
-			// transport and its supervisor consumed the close notification (it
-			// observes the Stop() as a graceful close and exits). The transport
-			// is stopped either way, so still report failure and let the loop
-			// retry with fresh state.
+		} else {
+			select {
+			case _, ok := <-closed:
+				// Single close notification consumed; close the channel so a later
+				// Close() doesn't block draining it. When the failed upgrade
+				// already closed the channel (its new transport never ran), ok is
+				// false and there is nothing left to close.
+				if ok {
+					close(closed)
+				}
+			case <-wh:
+				// Photo-finish: the handshake completed while we were stopping the
+				// transport and its supervisor consumed the close notification (it
+				// observes the Stop() as a graceful close and exits). The transport
+				// is stopped either way, so still report failure and let the loop
+				// retry with fresh state.
+			}
 		}
 	}
 	c.stopMessageLoop()

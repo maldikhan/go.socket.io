@@ -81,7 +81,8 @@ func TestSuperviseContextDone(t *testing.T) {
 	// context-done arm (closed is never written).
 	cancel()
 	client.ctx = ctx
-	closed := make(chan error) // never written
+	closed := make(chan error, 1)
+	closed <- ctx.Err() // transport exits after its run context is cancelled
 	done := make(chan struct{})
 
 	client.supervise(closed, done)

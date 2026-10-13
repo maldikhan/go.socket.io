@@ -112,3 +112,30 @@ func TestE2E_CoderConnectTimeoutSessionSurvives(t *testing.T) {
 		t.Fatal("established session did not survive the connect timeout")
 	}
 }
+
+func TestE2E_CoderReconnectWithConnectTimeout(t *testing.T) {
+	backend, err := ws_coder.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, err := ws.NewTransport(ws.WithWebSocket(backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := engineio.NewClient(
+		engineio.WithRawURL(strings.TrimRight(serverURL(), "/")+"/socket.io/"),
+		engineio.WithTransport(transport),
+		engineio.WithSupportedTransports([]engineio.Transport{transport}),
+		engineio.WithConnectTimeout(500*time.Millisecond),
+		engineio.WithReconnectWait(10*time.Millisecond),
+		engineio.WithReconnectAttempts(3),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := socketio.NewClient(socketio.WithEngineIOClient(engine))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runReconnectScenario(t, client)
+}
