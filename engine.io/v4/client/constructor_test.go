@@ -396,3 +396,39 @@ func TestWithReconnectWait(t *testing.T) {
 		})
 	}
 }
+
+func TestWithReconnect(t *testing.T) {
+	client := &Client{}
+
+	assert.NoError(t, WithReconnect(false)(client))
+	assert.False(t, client.reconnect)
+
+	assert.NoError(t, WithReconnect(true)(client))
+	assert.True(t, client.reconnect)
+}
+
+func TestWithReconnectHooks(t *testing.T) {
+	t.Run("WithOnReconnecting", func(t *testing.T) {
+		client := &Client{}
+		assert.NoError(t, WithOnReconnecting(func() {})(client))
+		assert.NotNil(t, client.reconnectingHandler)
+	})
+
+	t.Run("WithOnReconnect", func(t *testing.T) {
+		client := &Client{}
+		assert.NoError(t, WithOnReconnect(func() {})(client))
+		assert.NotNil(t, client.reconnectHandler)
+	})
+
+	t.Run("WithOnReconnectFailed", func(t *testing.T) {
+		client := &Client{}
+		assert.NoError(t, WithOnReconnectFailed(func() {})(client))
+		assert.NotNil(t, client.reconnectFailedHand)
+	})
+
+	t.Run("default reconnect enabled", func(t *testing.T) {
+		client, err := NewClient(WithRawURL("http://example.com"))
+		require.NoError(t, err)
+		assert.True(t, client.reconnect, "reconnect must default to true")
+	})
+}

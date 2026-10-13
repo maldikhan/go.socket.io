@@ -88,7 +88,7 @@ func TestClient_Connect_Timeout(t *testing.T) {
 		mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 		mockTransport.EXPECT().RequestHandshake().DoAndReturn(func() error {
 			go func() {
-				client.messages <- append([]byte{'0'}, respData...)
+				client.messages <- engineio_v4.Frame{Data: append([]byte{'0'}, respData...)}
 			}()
 			return nil
 		})
@@ -151,7 +151,7 @@ func TestClient_Connect_Timeout(t *testing.T) {
 
 		var runCtx context.Context
 		mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
-			DoAndReturn(func(ctx context.Context, _ *url.URL, _ string, _ chan<- []byte, _ chan<- error) error {
+			DoAndReturn(func(ctx context.Context, _ *url.URL, _ string, _ chan<- engineio_v4.Frame, _ chan<- error) error {
 				runCtx = ctx
 				return nil
 			})
@@ -246,7 +246,7 @@ func setupUpgradeScenario(t *testing.T, ctrl *gomock.Controller, timeout time.Du
 	mockPolling.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 	mockPolling.EXPECT().RequestHandshake().DoAndReturn(func() error {
 		go func() {
-			client.messages <- append([]byte{'0'}, respData...)
+			client.messages <- engineio_v4.Frame{Data: append([]byte{'0'}, respData...)}
 		}()
 		return nil
 	})
@@ -299,7 +299,7 @@ func TestClient_Connect_Timeout_Upgrade(t *testing.T) {
 		// The server answers the probe ping, finishing the upgrade.
 		mockWs.EXPECT().SendMessage([]byte("2probe")).DoAndReturn(func([]byte) error {
 			go func() {
-				client.messages <- []byte("3probe")
+				client.messages <- engineio_v4.Frame{Data: []byte("3probe")}
 			}()
 			return nil
 		})
@@ -451,7 +451,7 @@ func TestClient_Connect_Timeout_HandshakeProtocolError(t *testing.T) {
 			mockTransport.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 			mockTransport.EXPECT().RequestHandshake().DoAndReturn(func() error {
 				go func() {
-					client.messages <- append([]byte{'0'}, tc.openData...)
+					client.messages <- engineio_v4.Frame{Data: append([]byte{'0'}, tc.openData...)}
 				}()
 				return nil
 			})
@@ -559,7 +559,7 @@ func TestClient_Connect_Timeout_UpgradePacketWriteFailure(t *testing.T) {
 	upgradeErr := errors.New("upgrade write failed")
 	mockWs.EXPECT().SendMessage([]byte("2probe")).DoAndReturn(func([]byte) error {
 		go func() {
-			client.messages <- []byte("3probe")
+			client.messages <- engineio_v4.Frame{Data: []byte("3probe")}
 		}()
 		return nil
 	})

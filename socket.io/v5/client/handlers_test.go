@@ -416,7 +416,6 @@ func TestClientHandleConnect(t *testing.T) {
 
 	t.Run("With channel notify", func(t *testing.T) {
 		mockLogger.EXPECT().Infof(gomock.Any(), gomock.Any())
-		client.defaultNs.hadConnected = sync.Once{}
 		client.defaultNs.waitConnected = make(chan struct{})
 		client.handleConnect(ns, "test")
 

@@ -22,8 +22,10 @@ func newBinaryClient(t *testing.T) (*Client, *mocks.MockEngineIOClient) {
 	ctrl := gomock.NewController(t)
 	mockEngine := mocks.NewMockEngineIOClient(ctrl)
 
+	payloadParser, err := parser.NewParser(parser.WithLogger(&utils.DefaultLogger{Level: utils.NONE}))
+	require.NoError(t, err)
 	client := &Client{
-		parser:        parser.NewParser(parser.WithLogger(&utils.DefaultLogger{Level: utils.NONE})),
+		parser:        payloadParser,
 		engineio:      mockEngine,
 		logger:        &utils.DefaultLogger{Level: utils.NONE},
 		timer:         mocks.NewMockTimer(ctrl),
@@ -34,7 +36,7 @@ func newBinaryClient(t *testing.T) (*Client, *mocks.MockEngineIOClient) {
 	}
 	client.defaultNs = client.namespace("/")
 	// Mark default namespace as connected so Emit does not block.
-	client.defaultNs.hadConnected.Do(func() { close(client.defaultNs.waitConnected) })
+	client.defaultNs.openConnectionGate()
 	return client, mockEngine
 }
 

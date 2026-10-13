@@ -59,6 +59,8 @@ function wire(socket, ns) {
     socket.emit('binWelcome', Buffer.from(String(name)));
   });
 
+  socket.on('kick', () => { socket.conn.close(true); });
+
   // eslint-disable-next-line no-console
   console.log('client connected on namespace ' + ns + ': ' + socket.id);
 }

@@ -13,7 +13,11 @@ import (
 // newBinaryParser builds a default parser with a silent logger for the binary
 // tests.
 func newBinaryParser() *SocketIOV5DefaultParser {
-	return NewParser(WithLogger(logger))
+	p, err := NewParser(WithLogger(logger))
+	if err != nil {
+		panic(err)
+	}
+	return p
 }
 
 // TestParser_WrapCallback_Binary verifies that a reconstructed []byte payload

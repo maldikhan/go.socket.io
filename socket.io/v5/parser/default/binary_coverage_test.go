@@ -19,7 +19,7 @@ import (
 // of non-byte elements that contain binary (slice element recursion).
 func TestSerializeBinary_TopLevelPointerAndTypedSlice(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	t.Run("top-level pointer to struct with bytes", func(t *testing.T) {
 		data := []byte("ptr-top")
@@ -74,7 +74,7 @@ func TestSerializeBinary_TopLevelPointerAndTypedSlice(t *testing.T) {
 // (proving termination rather than a hang).
 func TestSerializeBinary_DepthBoundReturnsRaw(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	a := &cyclic{Name: "a"}
 	a.Self = a
@@ -97,7 +97,7 @@ func TestSerializeBinary_DepthBoundReturnsRaw(t *testing.T) {
 // reachable before the bound reports true.
 func TestHasBinary_DepthBound(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	a := &cyclic{Name: "a"}
 	a.Self = a
@@ -114,7 +114,7 @@ func TestHasBinary_DepthBound(t *testing.T) {
 // overflows the stack. Both shapes must terminate and report no binary.
 func TestHasBinary_FastPathCycleTerminates(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	cyclicMap := map[string]interface{}{}
 	cyclicMap["self"] = cyclicMap
@@ -136,7 +136,7 @@ func TestHasBinary_FastPathCycleTerminates(t *testing.T) {
 // reported and skipped without panicking.
 func TestWrapCallback_MarshalErrorSkipped(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	called := false
 	cb := func(v noBinaryStruct) { called = true }
@@ -214,7 +214,7 @@ type transformKinds struct {
 
 func TestSerializeBinary_TransformKindsCoverage(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	payload := transformKinds{
 		File:  []byte("f"),
@@ -259,7 +259,7 @@ func TestExtractBinary_MarshalError(t *testing.T) {
 // (the PkgPath continue).
 func TestHasBinary_TypedMapWithoutBinary(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 	assert.False(t, parser.HasBinary(&socketio_v5.Event{
 		Name:     "ev",
 		Payloads: []interface{}{map[string]int{"a": 1, "b": 2}},
@@ -268,7 +268,7 @@ func TestHasBinary_TypedMapWithoutBinary(t *testing.T) {
 
 func TestSerializeBinary_StructWithUnexportedField(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	// A struct with both an exported []byte and an unexported field reaches
 	// reflectExtractBinary; the unexported field is skipped (PkgPath continue)
@@ -291,7 +291,7 @@ func TestSerializeBinary_StructWithUnexportedField(t *testing.T) {
 // PkgPath continue while the bytes still become an attachment.
 func TestSerializeBinary_ExportedBinaryWithUnexportedField(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	_, attachments, err := parser.SerializeBinary(&socketio_v5.Message{
 		Type: socketio_v5.PacketEvent,

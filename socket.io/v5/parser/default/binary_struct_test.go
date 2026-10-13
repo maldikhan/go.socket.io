@@ -70,7 +70,7 @@ type cyclic struct {
 
 func TestHasBinary_StructPayloads(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	data := []byte{0x01, 0x02, 0x03, 0xff}
 
@@ -120,14 +120,14 @@ func TestHasBinary_StructPayloads(t *testing.T) {
 
 func TestHasBinary_NilEvent(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 	assert.False(t, parser.HasBinary(nil))
 }
 
 // A cyclic structure must not hang HasBinary (depth guard).
 func TestHasBinary_CyclicDoesNotHang(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	a := &cyclic{Name: "a"}
 	a.Self = a // self-reference
@@ -151,7 +151,7 @@ func TestHasBinary_CyclicDoesNotHang(t *testing.T) {
 // real BINARY packet with the bytes as an attachment, not a base64 string.
 func TestSerializeBinary_StructProducesAttachment(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	data := []byte{0xde, 0xad, 0xbe, 0xef}
 	event := &socketio_v5.Event{
@@ -192,7 +192,7 @@ func TestSerializeBinary_StructProducesAttachment(t *testing.T) {
 // field-by-field reflection walk.
 func TestSerializeBinary_StructPreservesJSONMarshaler(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	type withTime struct {
 		File []byte    `json:"file"`
@@ -232,7 +232,7 @@ func TestSerializeBinary_StructPreservesJSONMarshaler(t *testing.T) {
 // string.
 func TestSerializeBinary_RawMessageStaysInline(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	data := []byte{0x09, 0x08}
 	event := &socketio_v5.Event{
@@ -265,7 +265,7 @@ func TestSerializeBinary_RawMessageStaysInline(t *testing.T) {
 // the manual walk kept only the field name and dropped the options.
 func TestSerializeBinary_HonorsJSONTagOptions(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	type tagged struct {
 		File []byte `json:"file"`
@@ -300,7 +300,7 @@ func TestSerializeBinary_HonorsJSONTagOptions(t *testing.T) {
 // survives verbatim and only the real []byte becomes the placeholder.
 func TestSerializeBinary_UserStringMatchingOldSentinelPreserved(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	const oldSentinelB64 = "G1NJT0JJThsAAAAAAAAAAA==" // base64 of the former fixed attachment-0 sentinel
 	event := &socketio_v5.Event{
@@ -350,7 +350,7 @@ func (h *hexBlob) MarshalJSON() ([]byte, error) {
 
 func TestSerializeBinary_PointerMarshalerSliceNotCorrupted(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	event := &socketio_v5.Event{
 		Name:     "blobs",
@@ -378,7 +378,7 @@ func TestSerializeBinary_PointerMarshalerSliceNotCorrupted(t *testing.T) {
 // Socket.IO binary attachment instead of being buried as base64 JSON.
 func TestSerializeBinary_PointerMarshalerNonAddressableLiftsBinary(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	t.Run("top-level value", func(t *testing.T) {
 		t.Parallel()
@@ -426,7 +426,7 @@ type octet uint8
 // must not panic in sentinelSlice and must lift the bytes into a binary attachment.
 func TestSerializeBinary_NamedUint8ElementSliceNoPanic(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	event := &socketio_v5.Event{
 		Name:     "upload",
@@ -450,7 +450,7 @@ func TestSerializeBinary_NamedUint8ElementSliceNoPanic(t *testing.T) {
 // consistent (zero attachments, no placeholder) and matches the text path.
 func TestSerializeBinary_DroppedConflictFieldNotOrphaned(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	// Two fields mapping to the same JSON name; encoding/json's conflict
 	// resolution omits both. Built via reflect.StructOf so the deliberately
@@ -493,7 +493,7 @@ func TestSerializeBinary_DroppedConflictFieldNotOrphaned(t *testing.T) {
 // (if it ever went through SerializeBinary) yields zero attachments.
 func TestSerialize_NonBinaryStructStaysText(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	event := &socketio_v5.Event{
 		Name:     "hello",
@@ -516,7 +516,7 @@ func TestSerialize_NonBinaryStructStaysText(t *testing.T) {
 
 func TestWrapCallback_StructHandlerReceivesBinary(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	original := []byte{0x00, 0x10, 0x20, 0x7f, 0xfe}
 
@@ -546,7 +546,7 @@ func TestWrapCallback_StructHandlerReceivesBinary(t *testing.T) {
 
 func TestWrapCallback_NestedStructHandlerReceivesBinary(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	original := []byte("nested-bytes")
 
@@ -570,7 +570,7 @@ func TestWrapCallback_NestedStructHandlerReceivesBinary(t *testing.T) {
 // The existing direct-assignment fast paths must keep working.
 func TestWrapCallback_MapAndByteHandlersStillWork(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	original := []byte{1, 2, 3}
 
@@ -599,7 +599,7 @@ func TestWrapCallback_MapAndByteHandlersStillWork(t *testing.T) {
 // target type must be reported and skipped (no panic, callback not called).
 func TestWrapCallback_UnconvertibleValueSkipped(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	called := false
 	cb := func(v int) { called = true }
@@ -618,7 +618,7 @@ func TestWrapCallback_UnconvertibleValueSkipped(t *testing.T) {
 // always-valid-JSON invariant.
 func TestWrapCallback_RawMessageHandlerGetsValidJSONForBinary(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	original := []byte{0x00, 0xff, 0x10, 0x7f} // deliberately not valid JSON
 
@@ -640,7 +640,7 @@ func TestWrapCallback_RawMessageHandlerGetsValidJSONForBinary(t *testing.T) {
 // struct handler.
 func TestWrapCallback_RawMessageStructStillWorks(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	var got noBinaryStruct
 	cb := func(v noBinaryStruct) { got = v }
@@ -673,7 +673,7 @@ type ptrFieldStruct struct {
 // pointer fields and fixed-size arrays, and stringify non-string map keys.
 func TestSerializeBinary_ReflectiveShapes(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	t.Run("json tags and dash handling", func(t *testing.T) {
 		data := []byte{0xaa}
@@ -787,7 +787,7 @@ func TestSerializeBinary_ReflectiveShapes(t *testing.T) {
 // (depth bound) without hanging, including when serializing.
 func TestSerializeBinary_CyclicTerminates(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	a := &cyclic{Name: "a"}
 	a.Self = a
@@ -816,7 +816,7 @@ func TestSerializeBinary_CyclicTerminates(t *testing.T) {
 // reflectHasBinary array branch and []byte-array (not binary) cases.
 func TestHasBinary_ArrayAndByteArray(t *testing.T) {
 	t.Parallel()
-	parser := NewParser(WithLogger(logger))
+	parser, _ := NewParser(WithLogger(logger))
 
 	// [3][]byte array containing binary -> true.
 	assert.True(t, parser.HasBinary(&socketio_v5.Event{

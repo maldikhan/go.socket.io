@@ -15,14 +15,16 @@ func (c *Client) Emit(event interface{}, args ...interface{}) error {
 
 func (n *namespace) Emit(event interface{}, args ...interface{}) error {
 
-	if n.waitConnected != nil {
+	// Snapshot the gate under the namespace lock: resetConnectionGate replaces
+	// the channel when a reconnect cycle starts.
+	if waitConnected := n.connectionGate(); waitConnected != nil {
 		// Snapshot ctx under lock to prevent data race
 		n.client.mutex.RLock()
 		ctx := n.client.ctx
 		n.client.mutex.RUnlock()
 
 		select {
-		case <-n.waitConnected:
+		case <-waitConnected:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
