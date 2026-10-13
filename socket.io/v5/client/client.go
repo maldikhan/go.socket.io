@@ -43,7 +43,9 @@ type Client struct {
 	binaryMu           sync.Mutex
 	pendingBinary      *socketio_v5.Message
 	pendingNeeded      int
+	pendingBytes       int
 	pendingAttachments [][]byte
+	maxBinarySize      int
 
 	// redactPayload, when true, replaces raw payloads in debug logs with a
 	// size marker. Zero value is verbose; NewClient sets the safe default.
@@ -132,6 +134,9 @@ func (c *Client) SetHandshakeData(data map[string]interface{}) {
 }
 
 func (c *Client) connectSocketIO(_ []byte) {
+	c.binaryMu.Lock()
+	c.clearPendingLocked()
+	c.binaryMu.Unlock()
 	c.mutex.RLock()
 	handshakeData := c.handshakeData
 	c.mutex.RUnlock()
@@ -188,6 +193,9 @@ func (c *Client) safeGo(fn func()) {
 
 func (c *Client) Close() error {
 	err := c.engineio.Close()
+	c.binaryMu.Lock()
+	c.clearPendingLocked()
+	c.binaryMu.Unlock()
 	c.mutex.RLock()
 	namespaces := make([]*namespace, 0, len(c.namespaces))
 	for _, ns := range c.namespaces {

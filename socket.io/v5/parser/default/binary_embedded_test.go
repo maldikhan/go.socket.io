@@ -21,7 +21,7 @@ type binaryEmbeddedOuter struct {
 
 func TestBinaryUnexportedEmbeddedStruct(t *testing.T) {
 	t.Parallel()
-	p := NewParser()
+	p := newHardeningParser()
 	original := binaryEmbeddedOuter{binaryEmbeddedInner: binaryEmbeddedInner{File: []byte{1, 2}, Label: "kept", hidden: "private"}}
 	// encoding/json promotes the exported fields of an unexported anonymous struct.
 	plain, err := json.Marshal(original)
@@ -51,7 +51,7 @@ type binaryEmbeddedPointerOuter struct{ *binaryEmbeddedInner }
 
 func TestBinaryUnexportedEmbeddedPointerFailsExplicitly(t *testing.T) {
 	t.Parallel()
-	p := NewParser()
+	p := newHardeningParser()
 	original := binaryEmbeddedPointerOuter{&binaryEmbeddedInner{File: []byte{1, 2}}}
 	for _, payload := range []interface{}{original, &original, []binaryEmbeddedPointerOuter{original}, map[string]interface{}{"nested": original}} {
 		event := &socketio_v5.Event{Name: "upload", Payloads: []interface{}{payload}}
@@ -61,4 +61,12 @@ func TestBinaryUnexportedEmbeddedPointerFailsExplicitly(t *testing.T) {
 		require.ErrorContains(t, err, "unexported embedded pointers")
 	}
 	require.Equal(t, []byte{1, 2}, original.File)
+}
+
+func newHardeningParser(options ...ParserOption) *SocketIOV5DefaultParser {
+	p, err := NewParser(options...)
+	if err != nil {
+		panic(err)
+	}
+	return p
 }

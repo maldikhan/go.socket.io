@@ -2,6 +2,7 @@ package engineio_v4_client_transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"sync"
@@ -185,7 +186,13 @@ func (c *Transport) wsReadLoop() error {
 		go func() {
 			defer close(readDone)
 			var message []byte
-			isBinary, err := c.ws.ReceiveFrame(&message)
+			var isBinary bool
+			var err error
+			if binaryWS, ok := c.ws.(BinaryWebSocket); ok {
+				isBinary, err = binaryWS.ReceiveFrame(&message)
+			} else {
+				err = c.ws.Receive(&message)
+			}
 			if err != nil {
 				errorCh <- err
 				return
@@ -254,5 +261,9 @@ func (c *Transport) SendMessage(msg []byte) error {
 // binary travels in its own frame type.
 func (c *Transport) SendBinary(msg []byte) error {
 	c.log.Debugf("sendWsBinary: %s", c.payload(msg))
-	return c.ws.SendBinary(msg)
+	binaryWS, ok := c.ws.(BinaryWebSocket)
+	if !ok {
+		return errors.New("websocket implementation does not support binary attachments")
+	}
+	return binaryWS.SendBinary(msg)
 }

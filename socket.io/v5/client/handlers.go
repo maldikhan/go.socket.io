@@ -54,6 +54,19 @@ func (c *Client) emitReserved(event string) {
 func (c *Client) onMessage(data []byte) {
 	c.logger.Debugf("socketio receive %s", c.payload(data))
 
+	// A Socket.IO text packet cannot interrupt a binary packet's attachments.
+	// Drop both packets instead of assigning the old attachments to a new header.
+	c.binaryMu.Lock()
+	interrupted := c.pendingBinary != nil
+	if interrupted {
+		c.clearPendingLocked()
+	}
+	c.binaryMu.Unlock()
+	if interrupted {
+		c.logger.Errorf("received a text packet before all binary attachments, dropping incomplete packet")
+		return
+	}
+
 	msg, err := c.parser.Parse(data)
 	if err != nil {
 		c.logger.Errorf("Can't parse message: %v", err)
@@ -78,11 +91,16 @@ func (c *Client) onMessage(data []byte) {
 // zero attachments) so the caller dispatches it normally.
 func (c *Client) stageBinary(msg *socketio_v5.Message) bool {
 	needed := *msg.BinaryAttachments
+	binaryParser, ok := c.parser.(BinaryParser)
+	if !ok {
+		c.logger.Errorf("parser does not support binary attachments, dropping message")
+		return true
+	}
 	c.binaryMu.Lock()
 	if needed == 0 {
 		c.clearPendingLocked()
 		c.binaryMu.Unlock()
-		if err := c.parser.ReconstructBinary(msg, nil); err != nil {
+		if err := binaryParser.ReconstructBinary(msg, nil); err != nil {
 			c.logger.Errorf("Can't reconstruct binary message: %v", err)
 			return true
 		}
@@ -95,7 +113,7 @@ func (c *Client) stageBinary(msg *socketio_v5.Message) bool {
 	// hostile peer streams toward a target that never arrives, pinning unbounded
 	// memory. No realistic Socket.IO event carries this many attachments, so drop
 	// the message without staging.
-	if needed > maxBinaryAttachments {
+	if needed < 0 || needed > maxBinaryAttachments {
 		c.clearPendingLocked()
 		c.binaryMu.Unlock()
 		c.logger.Errorf("binary header declares %d attachments, exceeding the maximum of %d; dropping message", needed, maxBinaryAttachments)
@@ -103,6 +121,7 @@ func (c *Client) stageBinary(msg *socketio_v5.Message) bool {
 	}
 	c.pendingBinary = msg
 	c.pendingNeeded = needed
+	c.pendingBytes = 0
 	// Bound the preallocation independently: even a within-limit count should not
 	// be trusted as an exact capacity hint. The slice still grows via append as
 	// real attachment frames arrive.
@@ -129,6 +148,10 @@ const (
 	// on-the-wire attachment count. Real Socket.IO messages carry only a handful of
 	// attachments, so this is never a limit in practice.
 	maxPreallocAttachments = 64
+
+	// Bound aggregate retention, since a small attachment count can still carry
+	// arbitrarily large buffers. Callers can raise this limit when needed.
+	defaultMaxBinarySize = 64 << 20
 )
 
 // onBinaryAttachment collects a binary attachment frame and, once the staged
@@ -141,9 +164,20 @@ func (c *Client) onBinaryAttachment(data []byte) {
 		c.logger.Errorf("received binary attachment without a pending binary packet, dropping")
 		return
 	}
+	limit := c.maxBinarySize
+	if limit <= 0 {
+		limit = defaultMaxBinarySize
+	}
+	if len(data) > limit-c.pendingBytes {
+		c.clearPendingLocked()
+		c.binaryMu.Unlock()
+		c.logger.Errorf("binary attachments exceed maximum aggregate size of %d bytes, dropping message", limit)
+		return
+	}
 	// Copy the frame: the transport may reuse the underlying buffer.
 	buf := make([]byte, len(data))
 	copy(buf, data)
+	c.pendingBytes += len(data)
 	c.pendingAttachments = append(c.pendingAttachments, buf)
 	if len(c.pendingAttachments) < c.pendingNeeded {
 		c.binaryMu.Unlock()
@@ -154,7 +188,7 @@ func (c *Client) onBinaryAttachment(data []byte) {
 	c.clearPendingLocked()
 	c.binaryMu.Unlock()
 
-	if err := c.parser.ReconstructBinary(msg, attachments); err != nil {
+	if err := c.parser.(BinaryParser).ReconstructBinary(msg, attachments); err != nil {
 		c.logger.Errorf("Can't reconstruct binary message: %v", err)
 		return
 	}
@@ -166,6 +200,7 @@ func (c *Client) onBinaryAttachment(data []byte) {
 func (c *Client) clearPendingLocked() {
 	c.pendingBinary = nil
 	c.pendingNeeded = 0
+	c.pendingBytes = 0
 	c.pendingAttachments = nil
 }
 
@@ -285,6 +320,10 @@ func (c *Client) handleConnect(ns *namespace, payload interface{}) {
 }
 
 func (c *Client) handleEvent(ns *namespace, event *socketio_v5.Event) {
+	if event == nil {
+		c.logger.Errorf("received event packet without event data, dropping")
+		return
+	}
 	ns.mu.RLock()
 	handlers, ok := ns.handlers[event.Name]
 	anyHandlers := ns.anyHandlers

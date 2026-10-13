@@ -217,3 +217,15 @@ func WithDebugPayload(enabled bool) ClientOption {
 		return nil
 	}
 }
+
+// WithMaxBinarySize sets the maximum aggregate attachment bytes retained for a
+// single inbound binary event or acknowledgement. The default is 64 MiB.
+func WithMaxBinarySize(size int) ClientOption {
+	return func(c *InitClient) error {
+		if size <= 0 {
+			return errors.New("maximum binary size must be positive")
+		}
+		c.maxBinarySize = size
+		return nil
+	}
+}

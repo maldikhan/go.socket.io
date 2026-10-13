@@ -1102,7 +1102,11 @@ func (c *Client) SendBinary(message []byte) error {
 	// Pass the raw attachment bytes to the transport; each transport applies its
 	// own wire encoding (raw binary frame over websocket, base64 "b"-record over
 	// HTTP long-polling).
-	return t.SendBinary(message)
+	binaryTransport, ok := t.(BinaryTransport)
+	if !ok {
+		return errors.New("transport does not support binary attachments")
+	}
+	return binaryTransport.SendBinary(message)
 }
 
 func (c *Client) handleFrame(frame engineio_v4.Frame) error {

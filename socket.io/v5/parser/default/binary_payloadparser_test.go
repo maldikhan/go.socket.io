@@ -12,7 +12,7 @@ import (
 type legacyPayloadParser struct{}
 
 func (legacyPayloadParser) ParseEvent(data []byte, ack bool) (*socketio_v5.Event, error) {
-	ev, err := NewParser().ParseEvent(data, ack)
+	ev, err := newHardeningParser().ParseEvent(data, ack)
 	if err == nil {
 		for i, payload := range ev.Payloads {
 			ev.Payloads[i] = []byte(payload.(json.RawMessage))
@@ -30,12 +30,12 @@ func (binaryPayloadParser) ReconstructBinary(msg *socketio_v5.Message, attachmen
 	for i, payload := range msg.Event.Payloads {
 		msg.Event.Payloads[i] = json.RawMessage(payload.([]byte))
 	}
-	return NewParser().ReconstructBinary(msg, attachments)
+	return newHardeningParser().ReconstructBinary(msg, attachments)
 }
 
 func TestBinaryLegacyPayloadParserPreservesText(t *testing.T) {
 	t.Parallel()
-	p := NewParser(WithPayloadParser(legacyPayloadParser{}))
+	p := newHardeningParser(WithPayloadParser(legacyPayloadParser{}))
 	event := &socketio_v5.Event{Name: "upload", Payloads: []interface{}{[]byte{1, 2}}}
 	require.False(t, p.HasBinary(event))
 	msg := &socketio_v5.Message{Type: socketio_v5.PacketEvent, NS: "/", Event: event}
@@ -51,7 +51,7 @@ func TestBinaryLegacyPayloadParserPreservesText(t *testing.T) {
 
 func TestBinaryPayloadParserOwnsReconstruction(t *testing.T) {
 	t.Parallel()
-	p := NewParser(WithPayloadParser(binaryPayloadParser{}))
+	p := newHardeningParser(WithPayloadParser(binaryPayloadParser{}))
 	require.True(t, p.HasBinary(&socketio_v5.Event{Payloads: []interface{}{[]byte{1}}}))
 	msg, err := p.Parse([]byte(`51-["upload",{"_placeholder":true,"num":0}]`))
 	require.NoError(t, err)
@@ -62,7 +62,7 @@ func TestBinaryPayloadParserOwnsReconstruction(t *testing.T) {
 
 func TestBinaryReconstructionPreservesLargeIntegers(t *testing.T) {
 	t.Parallel()
-	p := NewParser()
+	p := newHardeningParser()
 	msg, err := p.Parse([]byte(`51-["upload",{"file":{"_placeholder":true,"num":0},"id":9007199254740993},9223372036854775807]`))
 	require.NoError(t, err)
 	require.NoError(t, p.ReconstructBinary(msg, [][]byte{{1, 2}}))

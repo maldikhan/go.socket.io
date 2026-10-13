@@ -33,6 +33,11 @@ type Transport interface {
 	RequestHandshake() error
 	Stop() error
 	SendMessage(message []byte) error
+}
+
+// BinaryTransport is an optional capability of a transport that can write
+// attachment frames in addition to its regular text packet format.
+type BinaryTransport interface {
 	// SendBinary delivers a raw binary attachment over the transport. Over
 	// websocket this is a binary frame; over HTTP long-polling it is encoded
 	// as a base64 "b"-prefixed record by the transport.

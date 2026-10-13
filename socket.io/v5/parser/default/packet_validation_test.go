@@ -9,7 +9,7 @@ import (
 
 func TestRejectMalformedSocketIOPackets(t *testing.T) {
 	t.Parallel()
-	p := NewParser()
+	p := newHardeningParser()
 	for _, data := range []string{"2", "3", "4", "7", "z", `2[null]`, `2["event"]garbage`, `51-["event",{"_placeholder":true,"num":0}]["extra"]`, `61-1[]null`} {
 		t.Run(data, func(t *testing.T) {
 			_, err := p.Parse([]byte(data))
