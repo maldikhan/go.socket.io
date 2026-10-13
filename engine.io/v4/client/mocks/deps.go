@@ -104,7 +104,7 @@ func (mr *MockTransportMockRecorder) RequestHandshake() *gomock.Call {
 }
 
 // Run mocks base method.
-func (m *MockTransport) Run(ctx context.Context, url *url.URL, sid string, messagesChan chan<- []byte, onClose chan<- error) error {
+func (m *MockTransport) Run(ctx context.Context, url *url.URL, sid string, messagesChan chan<- engineio_v4.Frame, onClose chan<- error) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Run", ctx, url, sid, messagesChan, onClose)
 	ret0, _ := ret[0].(error)
@@ -115,6 +115,20 @@ func (m *MockTransport) Run(ctx context.Context, url *url.URL, sid string, messa
 func (mr *MockTransportMockRecorder) Run(ctx, url, sid, messagesChan, onClose interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Run", reflect.TypeOf((*MockTransport)(nil).Run), ctx, url, sid, messagesChan, onClose)
+}
+
+// SendBinary mocks base method.
+func (m *MockTransport) SendBinary(message []byte) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SendBinary", message)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SendBinary indicates an expected call of SendBinary.
+func (mr *MockTransportMockRecorder) SendBinary(message interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendBinary", reflect.TypeOf((*MockTransport)(nil).SendBinary), message)
 }
 
 // SendMessage mocks base method.

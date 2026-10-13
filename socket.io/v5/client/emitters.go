@@ -148,9 +148,36 @@ func (c *Client) sendPacketWithAckTimeout(
 }
 
 func (c *Client) sendPacket(packet *socketio_v5.Message) error {
+	// Events carrying []byte payloads are sent as a binary packet: a text header
+	// with {"_placeholder"} markers followed by the raw attachment frames.
+	if packet.Event != nil && c.parser.HasBinary(packet.Event) {
+		header, attachments, err := c.parser.SerializeBinary(packet)
+		if err != nil {
+			return err
+		}
+		// Serialization happens outside the lock; only the transport writes are
+		// serialized so the header and all of its attachment frames are emitted
+		// contiguously, with no foreign frame interleaved by a concurrent emit.
+		c.sendMu.Lock()
+		defer c.sendMu.Unlock()
+		if err := c.engineio.Send(header); err != nil {
+			return err
+		}
+		for _, attachment := range attachments {
+			if err := c.engineio.SendBinary(attachment); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	packetData, err := c.parser.Serialize(packet)
 	if err != nil {
 		return err
 	}
+	// Hold sendMu so a single-frame packet cannot slip between a binary
+	// header and its attachment frames emitted by a concurrent binary send.
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 	return c.engineio.Send(packetData)
 }

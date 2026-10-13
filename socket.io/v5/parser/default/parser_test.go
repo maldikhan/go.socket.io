@@ -36,6 +36,20 @@ func TestSocketIOV5DefaultParser_Parse(t *testing.T) {
 			wantErr: ErrParsePackage,
 		},
 		{
+			// A binary header with the attachment count but no payload after it
+			// must be rejected, not panic in extractNamespace on empty input.
+			name:    "Truncated binary event header",
+			input:   []byte("51-"),
+			want:    nil,
+			wantErr: ErrParsePackage,
+		},
+		{
+			name:    "Truncated binary ack header",
+			input:   []byte("61-"),
+			want:    nil,
+			wantErr: ErrParsePackage,
+		},
+		{
 			name:  "Connect message",
 			input: []byte("0"),
 			want: &socketio_v5.Message{
@@ -102,13 +116,24 @@ func TestSocketIOV5DefaultParser_Parse(t *testing.T) {
 			wantErr: ErrParseEvent,
 		},
 		{
+			name:    "Binary event without attachment count",
+			input:   []byte("5"),
+			want:    nil,
+			wantErr: ErrParsePackage,
+		},
+		{
 			name:  "Binary event message",
-			input: []byte("5"),
+			input: []byte(`51-["binEvent",{"_placeholder":true,"num":0}]`),
 			want: &socketio_v5.Message{
-				Type: socketio_v5.PacketBinaryEvent,
-				NS:   "/",
+				Type:              socketio_v5.PacketBinaryEvent,
+				NS:                "/",
+				BinaryAttachments: intPtr(1),
+				Event: &socketio_v5.Event{
+					Name:     "binEvent",
+					Payloads: []interface{}{json.RawMessage(`{"_placeholder":true,"num":0}`)},
+				},
 			},
-			wantErr: ErrParseEventUnsupported,
+			wantErr: nil,
 		},
 		{
 			name:  "Connect error message",
