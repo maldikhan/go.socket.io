@@ -8,6 +8,6 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "socket.io": "^4.7.0"
+    "socket.io": "4.8.4"
   }
 }

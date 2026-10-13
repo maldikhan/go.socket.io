@@ -656,7 +656,7 @@ func (c *Client) handlePacket(packetData []byte) error {
 	c.log.Debugf("handle packet: %s", c.payload(packetData))
 	packet, err := c.parser.Parse(packetData)
 	if err != nil {
-		c.log.Errorf("Can't parse packet: %s %v", string(packetData), err)
+		c.log.Errorf("Can't parse packet: %s %v", c.payload(packetData), err)
 		return err
 	}
 

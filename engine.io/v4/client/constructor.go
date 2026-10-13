@@ -34,7 +34,17 @@ func NewClient(options ...EngineClientOption) (*Client, error) {
 		redactPayload: true, // production-safe default; WithDebugPayload(true) opts out
 	}
 
+	configured := false
+	defer func() {
+		if !configured {
+			client.pingInterval.Stop()
+		}
+	}()
+
 	for _, opt := range options {
+		if opt == nil {
+			return nil, errors.New("nil engine client option")
+		}
 		if err := opt(client); err != nil {
 			return nil, err
 		}
@@ -77,11 +87,17 @@ func NewClient(options ...EngineClientOption) (*Client, error) {
 		}
 	}
 
+	configured = true
 	return client, nil
 }
 
-func WithURL(url *url.URL) EngineClientOption {
+func WithURL(input *url.URL) EngineClientOption {
 	return func(c *Client) error {
+		if input == nil {
+			return errors.New("URL is nil")
+		}
+		copyURL := *input
+		url := &copyURL
 
 		switch url.Scheme {
 		case "http", "https":

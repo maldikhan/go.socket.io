@@ -52,7 +52,7 @@ jobs:
         if: github.event_name != 'pull_request' && github.actor != 'nektos/act'
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: ./
+          sarif_file: gosec.main.sarif
 
       - name: Display SARIF results
         if: github.actor == 'nektos/act'

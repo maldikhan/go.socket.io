@@ -3,8 +3,8 @@ FROM node:22-alpine
 WORKDIR /app
 
 # Install dependencies first to leverage Docker layer caching.
-COPY package.json ./
-RUN npm install --omit=dev
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 COPY index.js ./
 

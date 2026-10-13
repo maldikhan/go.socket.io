@@ -432,3 +432,19 @@ func TestWithReconnectHooks(t *testing.T) {
 		assert.True(t, client.reconnect, "reconnect must default to true")
 	})
 }
+
+func TestWithURLRetainsCallerURL(t *testing.T) {
+	original, err := url.Parse("wss://example.com/socket.io/?token=example")
+	require.NoError(t, err)
+	before := original.String()
+	client := &Client{}
+	require.NoError(t, WithURL(original)(client))
+	assert.Equal(t, before, original.String())
+	assert.Equal(t, "https", client.url.Scheme)
+	assert.Equal(t, "example", client.url.Query().Get("token"))
+	assert.Equal(t, "4", client.url.Query().Get("EIO"))
+	assert.NotSame(t, original, client.url)
+	require.Error(t, WithURL(nil)(client))
+	_, err = NewClient(nil)
+	require.Error(t, err)
+}
