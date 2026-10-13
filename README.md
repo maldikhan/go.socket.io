@@ -452,6 +452,9 @@ The following may be called concurrently from multiple goroutines:
 
 ## Limitations
 
+- A client accepts one public `Connect` call. For a new manual session after
+  failure or Close, create a new client. Automatic reconnection runs internally.
+
 - Reconnection establishes a new session and rejoins the configured default
   namespace. Events and acknowledgements from the previous session are not
   replayed; applications should use their own delivery IDs when replay is needed.

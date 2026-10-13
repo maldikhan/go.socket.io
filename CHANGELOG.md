@@ -43,6 +43,10 @@
   `chan<- []byte` to `chan<- engineio.Frame`. Set `Data` for text frames and
   `IsBinary: true` for raw attachment frames. Binary send methods on custom
   parsers, Engine.IO clients and WebSocket adapters remain optional capabilities.
+- Each constructed client accepts one public `Connect` call. Repeated or
+  concurrent calls return `ErrConnectAlreadyStarted`; Close is terminal and
+  calls afterward return `ErrClientClosed`. Construct another client for a new
+  manual session. Automatic reconnection is unaffected.
 - Reconnection is enabled by default. Use `engineio.WithReconnect(false)` to
   disable it. Delivery and outstanding acknowledgements are not replayed after
   a lost session.
