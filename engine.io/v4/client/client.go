@@ -117,7 +117,8 @@ type Client struct {
 	heartbeatErr      error
 	// cycleCtx is the current attempt/session context, including a retry's
 	// setup deadline cancellation. Upgrade must inherit the same context.
-	cycleCtx context.Context
+	cycleCtx    context.Context
+	cycleCancel context.CancelFunc
 
 	// handlerMu protects access to the handler fields
 	// (messageHandler, closeHandler, afterConnect).
@@ -988,7 +989,12 @@ func (c *Client) Close() error {
 	waitForCycle := atomic.LoadUint32(&c.supervisorStarted) == 1 ||
 		atomic.LoadUint32(&c.attemptInFlight) == 1
 	supervisorDone := c.supervisorDone
+	cycleCancel := c.cycleCancel
+	c.cycleCancel = nil
 	c.transportMu.Unlock()
+	if cycleCancel != nil {
+		cycleCancel()
+	}
 
 	if connectCancel != nil {
 		connectCancel()
