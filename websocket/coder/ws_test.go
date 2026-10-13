@@ -280,3 +280,49 @@ func TestConcurrentSendClose(t *testing.T) {
 		t.Fatal("Close did not unblock Receive")
 	}
 }
+
+func TestCloseHandshakeAndIdleCancellation(t *testing.T) {
+	t.Parallel()
+	for _, cancelSession := range []bool{false, true} {
+		name := "normal close handshake"
+		if cancelSession {
+			name = "idle session cancellation"
+		}
+		t.Run(name, func(t *testing.T) {
+			peerClosed := make(chan error, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					peerClosed <- err
+					return
+				}
+				defer conn.CloseNow()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_, _, err = conn.Read(ctx)
+				peerClosed <- err
+			}))
+			defer server.Close()
+			ws := newBackend(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			require.NoError(t, ws.Dial(ctx, endpoint(t, server.URL), nil))
+			// No client-side read or write is pending: the session context must
+			// still close an idle connection, rather than only aborting Dial.
+			if cancelSession {
+				cancel()
+			} else {
+				require.NoError(t, ws.Close())
+			}
+			select {
+			case err := <-peerClosed:
+				require.Error(t, err)
+				if !cancelSession {
+					assert.Equal(t, websocket.StatusNormalClosure, websocket.CloseStatus(err))
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("server did not observe the connection closing")
+			}
+		})
+	}
+}
